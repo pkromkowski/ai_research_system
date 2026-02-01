@@ -93,8 +93,6 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
     
     # SPOF contribution per failure
     SPOF_CONTRIBUTION_PER_FAILURE: float = 0.1
-    
-
 
     # Node type constants (instance-level override allowed via constructor)
     NODE_TYPE_ASSUMPTION: str = CT_NODE_ASSUMPTION
@@ -556,22 +554,6 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         nodes = self.distribute_confidence(thesis_narrative, nodes)
         return nodes
 
-    def _assemble_ndg_output(self, *, thesis_narrative: str, nodes: List[NDGNode], edges: List[NDGEdge], fragility: FragilityMetrics, total_confidence: float, confidence_consistent: bool, summary_text: str, parsed_metrics: Dict[str, Any], claims: List[Dict[str, Any]]) -> NDGOutput:
-        """Create and return `NDGOutput` from components."""
-        return NDGOutput(
-            stock_ticker=self.stock_ticker,
-            thesis_text=thesis_narrative,
-            nodes=nodes,
-            edges=edges,
-            fragility_metrics=fragility,
-            total_confidence=total_confidence,
-            confidence_sum=getattr(self, '_last_confidence_sum', total_confidence),
-            confidence_consistent=getattr(self, '_last_confidence_consistent', confidence_consistent),
-            summary_text=summary_text,
-            extracted_metrics=parsed_metrics,
-            extracted_claims=claims
-        )
-
     # --- 2.6 FRAGILITY & CONCENTRATION DIAGNOSTICS ---
     def compute_fragility(
         self, 
@@ -643,10 +625,7 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         
         # 3. Single-point failures (nodes with low evidence but high path concentration)
         def count_paths_through_node(node_id: str) -> int:
-            """Count how many paths from assumptions to outcomes pass through this node.
-
-            Uses memoization to avoid repeated traversal of shared subgraphs.
-            """
+            """Count how many paths from assumptions to outcomes pass through this node."""
             upstream_memo: Dict[str, int] = {}
             downstream_memo: Dict[str, int] = {}
 
@@ -685,7 +664,7 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         spof_details = []
         
         for node in nodes:
-            if node.node_type == self.NODE_TYPE_DRIVER:  # Only drivers can be SPOFs
+            if node.node_type == self.NODE_TYPE_DRIVER:
                 path_count = count_paths_through_node(node.id)
                 path_concentration[node.id] = path_count
                 
@@ -847,14 +826,16 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         confidence_sum = getattr(self, '_last_confidence_sum', total_conf)
         confidence_consistent = getattr(self, '_last_confidence_consistent', confidence_consistent)
 
-        return self._assemble_ndg_output(
-            thesis_narrative=thesis_narrative,
+        return NDGOutput(
+            stock_ticker=self.stock_ticker,
+            thesis_text=thesis_narrative,
             nodes=nodes,
             edges=edges,
-            fragility=fragility,
+            fragility_metrics=fragility,
             total_confidence=total_conf,
+            confidence_sum=confidence_sum,
             confidence_consistent=confidence_consistent,
             summary_text=summary_text,
-            parsed_metrics=parsed_metrics,
-            claims=claims
+            extracted_metrics=parsed_metrics,
+            extracted_claims=claims
         )
