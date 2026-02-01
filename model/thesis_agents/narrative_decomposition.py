@@ -58,11 +58,6 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
     TEMPERATURE_EVIDENCE: float = 0.1  # Slightly higher for evidence exploration
     TEMPERATURE_CONFIDENCE: float = 0.0
     
-    # Approved classification values
-    # These are guidance for LLM, not constraints on analyst thesis
-    APPROVED_TIME_HORIZONS: List[str] = ["Short", "Medium", "Long"]
-    APPROVED_RELATIONSHIPS: List[str] = ["CAUSES", "ENABLES", "MODERATES"]
-    
     # Confidence validation
     # Tolerance for how far confidence sum can deviate from 1.0
     CONFIDENCE_SUM_TOLERANCE: float = 0.15
@@ -99,8 +94,7 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
     # SPOF contribution per failure
     SPOF_CONTRIBUTION_PER_FAILURE: float = 0.1
     
-    # Warning thresholds for final diagnostics
-    HIGH_ASSUMPTION_LOAD_THRESHOLD: float = 5.0  # avg assumptions per outcome
+
 
     # Node type constants (instance-level override allowed via constructor)
     NODE_TYPE_ASSUMPTION: str = CT_NODE_ASSUMPTION
@@ -124,18 +118,12 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
 
     # --- 2.1 Thesis parsing & claim identification ---
     def parse_thesis(self, thesis_narrative: str) -> Dict[str, Any]:
-        """
-        Extract claims, drivers, outcomes, and any quantifiable metrics from thesis text.
+        """Parse an analyst thesis into structured claims and optional metrics.
 
-        Uses structured LLM tool-use and returns a dictionary with keys:
-        - 'claims': List[claim dicts]
-        - 'metrics': Optional dict of quantitative metrics
+        Normalizes legacy field names (e.g., ``time_horizon`` -> ``time_sensitivity``)
+        and ensures each claim includes a ``directionality`` key.
 
-        Args:
-            thesis_narrative: Raw thesis text from analyst
-
-        Returns:
-            Dict with structured claims and optional metrics suitable for downstream analysis.
+        Returns a dict with keys ``claims`` and ``metrics`` suitable for downstream use.
         """
         prompt = self.format_prompt(
             NDG_PARSE_THESIS_PROMPT,
@@ -171,18 +159,14 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
     
     # --- 2.2 Causal graph construction ---
     def build_dag(self, claims: List[Dict]) -> Tuple[List[NDGNode], List[NDGEdge]]:
-        """
-        Assemble claims into a directed acyclic graph (DAG).
+        """Construct a DAG from parsed claims.
 
-        Enforces structural constraints (no cycles, every path terminates in an
-        outcome node) and returns node and edge dataclasses suitable for
-        downstream analysis.
+        The LLM returns node and edge records; this method validates acyclicity
+        and converts records into `NDGNode`/`NDGEdge` dataclasses. Parsed fields
+        such as ``directionality`` and ``time_sensitivity`` are preserved on
+        nodes when available.
 
-        Args:
-            claims: Structured claims from `parse_thesis()`
-
-        Returns:
-            (nodes, edges) where nodes are `NDGNode` and edges are `NDGEdge`.
+        Returns a tuple: (nodes, edges).
         """
         prompt = self.format_prompt(
             NDG_BUILD_DAG_PROMPT,
@@ -197,15 +181,13 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
             temperature=self.TEMPERATURE_DAG,
         )
 
-        # Validate DAG (no cycles)
         if not self._is_dag(graph_data['edges']):
             logger.warning("Cycles detected in graph - resolved weakest edges")
             graph_data = self._break_cycles(graph_data)
 
-        # Build quick map of parsed claims to preserve fields like directionality/time
+        # preserve parsed claim fields
         claim_map = {c['claim']: c for c in claims}
 
-        # Convert to dataclasses (will be enriched in later steps)
         nodes = [
             NDGNode(
                 id=n['id'],
@@ -300,23 +282,9 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
     
     # --- 2.3 Assumption localization & ownership ---
     def classify_assumptions(self, nodes: List[NDGNode]) -> List[NDGNode]:
-        """
-        Classify each node by control, nature, and time sensitivity.
-        
-        Dimensions:
-        - Control: Company / Industry / Macro / Exogenous
-        - Nature: Structural / Cyclical / Execution
-        - Time sensitivity: Short / Medium / Long
-        
-        Rules:
-        - Do not label "Exogenous" unless no internal lever exists
-        - Misclassified assumptions flagged for review
-        
-        Args:
-            nodes: Graph nodes from build_dag()
-            
-        Returns:
-            Nodes with ownership metadata populated
+        """Classify each node by ``control``, ``nature``, and ``time_sensitivity``.
+
+        The method updates nodes in-place and returns the modified list.
         """
         nodes_json = json.dumps(
             [{'id': n.id, 'claim': n.claim, 'type': n.node_type} for n in nodes], 
@@ -358,32 +326,16 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         company_context: str,
         quantitative_context: Optional[ThesisQuantitativeContext] = None
     ) -> List[NDGNode]:
-        """
-        Link supporting and contradicting evidence to each node.
-        
-        Evidence types:
-        - Quantitative: KPIs, financials
-        - Qualitative: Management commentary
-        - External: Industry data, competitors
-        
-        Rules:
-        - Absence of evidence explicitly recorded
-        - Evidence must be node-specific, not thesis-level
-        
-        Args:
-            nodes: Classified nodes from classify_assumptions()
-            company_context: Company description for context
-            quantitative_context: Optional Stage 1 quantitative context (supplementary)
-            
-        Returns:
-            Nodes with evidence metadata populated
+        """Attach supporting and contradicting evidence to each node.
+
+        Each node receives ``evidence_sources``, ``contradicting_evidence``, and
+        an ``evidence_strength`` score (0-1) returned by the structured LLM call.
         """
         nodes_json = json.dumps(
             [{'id': n.id, 'claim': n.claim, 'type': n.node_type, 'control': n.control} for n in nodes], 
             indent=2
         )
         
-        # Format quantitative context if provided
         quant_context_str = ""
         if quantitative_context:
             quant_context_str = quantitative_context.to_prompt_context()
@@ -403,7 +355,6 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
             temperature=self.TEMPERATURE_EVIDENCE,
         )
 
-        # Apply evidence to nodes and compute average
         evidence_map = {e['id']: e for e in evidence_data['evidence_map']}
         weak_nodes = []
         total_evidence = 0.0
@@ -430,22 +381,10 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         normalize: bool = False,
         normalize_method: str = 'proportional'
     ) -> List[NDGNode]:
-        """
-        Decompose analyst conviction across graph nodes using structured
-        LLM outputs. Extracts certainty markers and allocates a confidence
-        value (0-1) and short basis for each node.
+        """Allocate a confidence value (0-1) and short basis for each node.
 
-        Notes:
-        - Uses structured tool-use to ensure machine-readable output.
-        - Emits a warning if the total confidence deviates from ~1.0 by more
-          than `CONFIDENCE_SUM_TOLERANCE`.
-
-        Args:
-            thesis_narrative: Original thesis text
-            nodes: Nodes with evidence mapped
-
-        Returns:
-            Nodes updated with `confidence` and `confidence_basis` fields.
+        The LLM returns a confidence distribution and an optional ``total_confidence``
+        value; the method updates nodes in-place and returns the node list.
         """ 
         nodes_json = json.dumps([{
             'id': n.id, 
@@ -467,7 +406,6 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
             temperature=self.TEMPERATURE_CONFIDENCE,
         )
 
-        # Apply confidence to nodes
         conf_map = {c['id']: c for c in conf_data['confidence_distribution']}
         for node in nodes:
             if node.id in conf_map:
@@ -494,8 +432,6 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         if overconf_warnings:
             logger.warning(f"Overconfidence detected in {len(overconf_warnings)} nodes")
 
-        # Expose confidence metadata on nodes container via a simple side-effect
-        # Return nodes as normal; caller should use the returned metadata
         self._last_confidence_sum = confidence_sum
         self._last_confidence_consistent = confidence_consistent
 
@@ -511,7 +447,6 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
 
         Returns a dict with keys: 'method', 'original_sum', 'new_sum', 'adjustments'
         """
-        # Compute original sum
         original_sum = sum(max(0.0, n.confidence) for n in nodes)
         adjustments: Dict[str, Tuple[float, float]] = {}
 
@@ -594,12 +529,9 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         return f"Fragility: {fragility.fragility_score:.2f}; nodes: {len(nodes)}; avg_evidence: {avg_evidence:.2f}"
 
     def _prepare_inputs(self, thesis_narrative: Optional[str], company_context: Optional[str], thesis_input: Optional[ThesisInput]) -> Tuple[str, str]:
-        """Validate and prefer typed `ThesisInput` when available. Returns (narrative, company_context)."""
+        """Return validated inputs, preferring `thesis_input` when provided."""
         if thesis_input is not None:
-            if thesis_narrative:
-                logger.debug("Both thesis_input and thesis_narrative provided; using thesis_input.narrative")
             thesis_narrative = thesis_input.narrative
-            # If company_context missing, attempt to pull from ThesisInput if it included it in future versions
 
         if not thesis_narrative:
             raise ValueError("thesis_narrative is required for NDG analysis")
@@ -885,17 +817,7 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         Raises:
             ValueError: If `company_context` is empty or None or if no thesis is provided
         """
-        # Accept either ThesisInput or raw narrative; prefer explicit ThesisInput
-        if thesis_input is not None:
-            if thesis_narrative:
-                logger.debug("Both thesis_input and thesis_narrative provided; using thesis_input.narrative")
-            thesis_narrative = thesis_input.narrative
-
-        if not thesis_narrative:
-            raise ValueError("thesis_narrative is required for NDG analysis")
-
-        if not company_context:
-            raise ValueError("company_context is required for NDG analysis")
+        thesis_narrative, company_context = self._prepare_inputs(thesis_narrative, company_context, thesis_input)
 
         logger.info(f"Starting NDG pipeline for {self.stock_ticker}")
         
@@ -922,21 +844,17 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
 
         summary_text = self._format_summary(fragility, nodes, avg_evidence)
 
-        # Use stored metadata when available for confidence_sum/consistency
         confidence_sum = getattr(self, '_last_confidence_sum', total_conf)
         confidence_consistent = getattr(self, '_last_confidence_consistent', confidence_consistent)
 
-        # Construct canonical NDGOutput directly (explicit and auditable)
-        return NDGOutput(
-            stock_ticker=self.stock_ticker,
-            thesis_text=thesis_narrative,
+        return self._assemble_ndg_output(
+            thesis_narrative=thesis_narrative,
             nodes=nodes,
             edges=edges,
-            fragility_metrics=fragility,
+            fragility=fragility,
             total_confidence=total_conf,
-            confidence_sum=confidence_sum,
             confidence_consistent=confidence_consistent,
             summary_text=summary_text,
-            extracted_metrics=parsed_metrics,
-            extracted_claims=claims
+            parsed_metrics=parsed_metrics,
+            claims=claims
         )
