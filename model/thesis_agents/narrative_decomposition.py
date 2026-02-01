@@ -5,7 +5,7 @@ from typing import List, Dict, Set, Tuple, Optional, Any
 
 from model.thesis_agents.pipeline_helpers import LLMHelperMixin
 from model.core.types import (
-    NDGNode, NDGEdge, FragilityMetrics, NDGOutput, ThesisQuantitativeContext, ThesisInput,
+    NDGNode, NDGEdge, FragilityMetrics, FeedbackLoop, NDGOutput, ThesisQuantitativeContext, ThesisInput,
     NODE_TYPE_ASSUMPTION as CT_NODE_ASSUMPTION,
     NODE_TYPE_DRIVER as CT_NODE_DRIVER,
     NODE_TYPE_OUTCOME as CT_NODE_OUTCOME,
@@ -78,15 +78,20 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
     SPOF_EVIDENCE_THRESHOLD: float = 0.5
     
     # Fragility scoring configuration
-    # Graph depth above which penalty applies
     DEPTH_PENALTY_THRESHOLD: int = 5
     DEPTH_PENALTY_PER_LAYER: float = 0.1
-    
+
     # Maximum contribution of each component to fragility score (sum to 1.0)
     MAX_FRAGILITY_ASSUMPTION_LOAD: float = 0.3
     MAX_FRAGILITY_GRAPH_DEPTH: float = 0.3
     MAX_FRAGILITY_SPOF: float = 0.2
     MAX_FRAGILITY_EVIDENCE: float = 0.2
+
+    # Feedback loop handling thresholds (stage 1+2)
+    LOOP_EDGE_STRENGTH_THRESHOLD: float = 0.6
+    LOOP_EVIDENCE_THRESHOLD: float = 0.6
+    LOOP_REINFORCEMENT_BONUS_MAX: float = 0.1
+    LOOP_WEAKNESS_PENALTY_MAX: float = 0.1
     
     # Assumption load scaling factor (per outcome)
     ASSUMPTION_LOAD_SCALE_FACTOR: float = 0.05
@@ -659,25 +664,160 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
             downstream = count_downstream(node_id)
             return upstream * downstream
         
+        # --- Detect feedback loops (SCCs) ---
+        # Tarjan's algorithm for SCCs
+        node_ids = list(node_map.keys())
+        index = 0
+        indices: Dict[str, int] = {}
+        lowlink: Dict[str, int] = {}
+        stack: List[str] = []
+        onstack: Set[str] = set()
+        sccs: List[List[str]] = []
+
+        def strongconnect(v: str):
+            nonlocal index
+            indices[v] = index
+            lowlink[v] = index
+            index += 1
+            stack.append(v)
+            onstack.add(v)
+
+            for w in outgoing.get(v, []):
+                if w not in indices:
+                    strongconnect(w)
+                    lowlink[v] = min(lowlink[v], lowlink[w])
+                elif w in onstack:
+                    lowlink[v] = min(lowlink[v], indices[w])
+
+            if lowlink[v] == indices[v]:
+                comp: List[str] = []
+                while True:
+                    w = stack.pop()
+                    onstack.remove(w)
+                    comp.append(w)
+                    if w == v:
+                        break
+                sccs.append(comp)
+
+        for nid in node_ids:
+            if nid not in indices:
+                strongconnect(nid)
+
+        loops = [s for s in sccs if len(s) > 1]
+
+        feedback_loops: List[dict] = []
+        loop_bonus_total = 0.0
+        loop_penalty_total = 0.0
+
+        # Build a fast set for edges per (src,target) strength lookup
+        edge_strength_map = {(e.source_id, e.target_id): e.strength for e in edges}
+
+        for i, loop in enumerate(loops):
+            # internal edge strength average
+            internal_edges = [edge_strength_map.get((a, b), 0.0) for a in loop for b in loop if a != b]
+            avg_edge_strength = sum(internal_edges) / len(internal_edges) if internal_edges else 0.0
+            avg_evidence = sum(node_map[nid].evidence_strength for nid in loop) / len(loop)
+            control_counts: Dict[str, int] = {}
+            for nid in loop:
+                ctrl = getattr(node_map[nid], 'control', '') or 'Unknown'
+                control_counts[ctrl] = control_counts.get(ctrl, 0) + 1
+
+            # Determine reinforcement vs weakness
+            reinforcing = (
+                avg_edge_strength >= self.LOOP_EDGE_STRENGTH_THRESHOLD and
+                avg_evidence >= self.LOOP_EVIDENCE_THRESHOLD and
+                (control_counts.get('Exogenous', 0) / len(loop)) < 0.5
+            )
+
+            # Compute conservative bonus/penalty
+            if reinforcing:
+                factor = max(0.0, ((avg_edge_strength - self.LOOP_EDGE_STRENGTH_THRESHOLD) + (avg_evidence - self.LOOP_EVIDENCE_THRESHOLD)) / (2 * (1.0 - self.LOOP_EDGE_STRENGTH_THRESHOLD)))
+                bonus = self.LOOP_REINFORCEMENT_BONUS_MAX * min(1.0, factor)
+                loop_bonus_total += bonus
+            else:
+                # loop weakness when both edge and evidence are below thresholds
+                if avg_edge_strength < self.LOOP_EDGE_STRENGTH_THRESHOLD and avg_evidence < self.LOOP_EVIDENCE_THRESHOLD:
+                    factor = max(0.0, ((self.LOOP_EDGE_STRENGTH_THRESHOLD - avg_edge_strength) + (self.LOOP_EVIDENCE_THRESHOLD - avg_evidence)) / (2 * self.LOOP_EDGE_STRENGTH_THRESHOLD))
+                    penalty = self.LOOP_WEAKNESS_PENALTY_MAX * min(1.0, factor)
+                    loop_penalty_total += penalty
+                else:
+                    penalty = 0.0
+                    bonus = 0.0
+
+            feedback_loops.append({
+                'id': f'loop_{i+1}',
+                'nodes': loop,
+                'avg_edge_strength': avg_edge_strength,
+                'avg_evidence': avg_evidence,
+                'control_mix': control_counts,
+                'reinforcing': reinforcing
+            })
+
+        # Build condensation graph (SCCs as nodes) for path/depth calculations
+        scc_map: Dict[str, int] = {}
+        for idx, comp in enumerate(sccs):
+            for nid in comp:
+                scc_map[nid] = idx
+
+        scc_outgoing: Dict[int, Set[int]] = defaultdict(set)
+        scc_incoming: Dict[int, Set[int]] = defaultdict(set)
+        for e in edges:
+            s = scc_map.get(e.source_id)
+            t = scc_map.get(e.target_id)
+            if s is not None and t is not None and s != t:
+                scc_outgoing[s].add(t)
+                scc_incoming[t].add(s)
+
+        # Memoized upstream/downstream counts per SCC
+        scc_upstream_memo: Dict[int, int] = {}
+        scc_downstream_memo: Dict[int, int] = {}
+
+        def count_upstream_scc(sid: int) -> int:
+            if sid in scc_upstream_memo:
+                return scc_upstream_memo[sid]
+            # If any node in SCC is an assumption, count as 1
+            comp_nodes = sccs[sid]
+            if any(node_map[nid].node_type == self.NODE_TYPE_ASSUMPTION for nid in comp_nodes):
+                scc_upstream_memo[sid] = 1
+                return 1
+            total = 0
+            for parent in scc_incoming.get(sid, []):
+                total += count_upstream_scc(parent)
+            scc_upstream_memo[sid] = total
+            return total
+
+        def count_downstream_scc(sid: int) -> int:
+            if sid in scc_downstream_memo:
+                return scc_downstream_memo[sid]
+            comp_nodes = sccs[sid]
+            if any(node_map[nid].node_type == self.NODE_TYPE_OUTCOME for nid in comp_nodes):
+                scc_downstream_memo[sid] = 1
+                return 1
+            total = 0
+            for child in scc_outgoing.get(sid, []):
+                total += count_downstream_scc(child)
+            scc_downstream_memo[sid] = total
+            return total
+
         path_concentration = {}
         single_point_failures = []
         spof_details = []
-        
+
         for node in nodes:
-            if node.node_type == self.NODE_TYPE_DRIVER:
-                path_count = count_paths_through_node(node.id)
-                path_concentration[node.id] = path_count
-                
-                # SPOF criteria: high concentration + low evidence
-                if (path_count >= self.SPOF_MIN_PATH_COUNT and 
-                    node.evidence_strength < self.SPOF_EVIDENCE_THRESHOLD):
-                    single_point_failures.append(node.id)
-                    spof_details.append({
-                        'node_id': node.id,
-                        'claim': node.claim,
-                        'path_count': path_count,
-                        'evidence_strength': node.evidence_strength
-                    })
+            sid = scc_map.get(node.id)
+            upstream = count_upstream_scc(sid)
+            downstream = count_downstream_scc(sid)
+            path_count = upstream * downstream
+            path_concentration[node.id] = path_count
+
+            if (path_count >= self.SPOF_MIN_PATH_COUNT and node.evidence_strength < self.SPOF_EVIDENCE_THRESHOLD):
+                single_point_failures.append(node.id)
+                spof_details.append({
+                    'node_id': node.id,
+                    'claim': node.claim,
+                    'path_count': path_count,
+                    'evidence_strength': node.evidence_strength
+                })
         
         # 4. Max graph depth
         # Use memoization to compute max depth from node efficiently
@@ -741,10 +881,28 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         fragility_score += evidence_component
         fragility_components['evidence_weakness'] = evidence_component
         
-        fragility_score = min(1.0, fragility_score)
+        # Apply loop-based adjustments
+        fragility_components['feedback_loops_bonus'] = loop_bonus_total
+        fragility_components['feedback_loops_penalty'] = loop_penalty_total
+
+        # convert feedback loop dicts into FeedbackLoop objects for structured output
+        loops_objs: List[FeedbackLoop] = [
+            FeedbackLoop(
+                id=l['id'],
+                nodes=l['nodes'],
+                avg_edge_strength=l['avg_edge_strength'],
+                avg_evidence=l['avg_evidence'],
+                control_mix=l['control_mix'],
+                reinforcing=l['reinforcing']
+            ) for l in feedback_loops
+        ]
+
+        # adjust fragility score conservatively
+        fragility_score = fragility_score - loop_bonus_total + loop_penalty_total
+        fragility_score = min(1.0, max(0.0, fragility_score))
         fragility_components['total'] = fragility_score
-        
-        logger.info(f"Computed fragility: {fragility_score:.2f}")
+
+        logger.info(f"Computed fragility: {fragility_score:.2f}; loops={len(loops_objs)}")
         return FragilityMetrics(
             assumption_load=assumption_load,
             avg_assumptions_per_outcome=avg_assumptions_per_outcome,
@@ -752,7 +910,8 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
             path_concentration=path_concentration,
             max_graph_depth=max_graph_depth,
             fragility_score=fragility_score,
-            fragility_components=fragility_components
+            fragility_components=fragility_components,
+            feedback_loops=loops_objs
         )
     
     # --- 2.7 MAIN PIPELINE ---

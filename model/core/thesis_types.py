@@ -224,6 +224,17 @@ class NDGEdge:
     strength: float = 0.5  # 0-1: how strong is this causal link
 
 @dataclass
+class FeedbackLoop:
+    """Metadata describing a detected feedback loop (strongly connected component)."""
+    id: str
+    nodes: List[str]
+    avg_edge_strength: float
+    avg_evidence: float
+    control_mix: Dict[str, int]
+    reinforcing: bool = False
+
+
+@dataclass
 class FragilityMetrics:
     """Structural fragility diagnostics (2.6)
 
@@ -238,6 +249,7 @@ class FragilityMetrics:
     max_graph_depth: int  # Longest path from assumption to outcome
     fragility_score: float  # 0-1: overall structural brittleness
     fragility_components: Optional[Dict[str, float]] = None  # Breakdown by component (optional)
+    feedback_loops: List[FeedbackLoop] = field(default_factory=list)  # Detected feedback loops
 
 @dataclass
 class NDGOutput:
