@@ -1,6 +1,6 @@
+import math
 import json
 import logging
-import math
 from collections import defaultdict
 from typing import List, Dict, Set, Tuple, Optional, Any
 
@@ -122,6 +122,19 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
     IMPORTANCE_LOW: float = 0.2
     IMPORTANCE_HIGH: float = 0.5
     CONFIDENCE_LOW_PENALTY_PER_NODE: float = 0.02
+
+    # Joint SPOF configuration
+    JOINT_SPOF_K: int = 6  # top-K candidates per outcome to check pairwise
+    JOINT_SPOF_EVIDENCE_THRESHOLD: float = 0.6
+    JOINT_SPOF_PENALTY_MAX: float = 0.15
+
+    # Assumption redundancy handling
+    REDUNDANCY_BONUS_CAP: float = 0.5  # max reduction in load due to redundancy
+
+    # Depth path enumeration limits
+    PATH_ENUMERATION_MAX: int = 500  # cap on enumerated paths per outcome to bound runtime
+    PATH_MAX_LENGTH: int = 20  # max path length to consider
+    DEPTH_PENALTY_PER_LAYER: float = 0.1
     
     # Assumption load scaling factor (per outcome)
     ASSUMPTION_LOAD_SCALE_FACTOR: float = 0.05
@@ -849,66 +862,134 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
                     'evidence_strength': node.evidence_strength
                 })
         
-        # 4. Max graph depth
-        # Use memoization to compute max depth from node efficiently
-        depth_memo: Dict[str, int] = {}
-        def max_depth_from_node(node_id: str) -> int:
-            if node_id in depth_memo:
-                return depth_memo[node_id]
-            if not outgoing[node_id]:
-                depth_memo[node_id] = 1
-                return 1
-            max_child_depth = 0
-            for child_id in outgoing[node_id]:
-                child_depth = max_depth_from_node(child_id)
-                max_child_depth = max(max_child_depth, child_depth)
-            depth_memo[node_id] = 1 + max_child_depth
-            return depth_memo[node_id]
-        
-        max_graph_depth = 0
-        for assumption in assumptions:
-            depth = max_depth_from_node(assumption.id)
-            max_graph_depth = max(max_graph_depth, depth)
-        
-        # 5. Overall fragility score
-        # Penalize: many assumptions, deep graph, single-point failures, low evidence
-        fragility_score = 0.0
-        fragility_components = {}
-        
-        # Component 1: Assumption load (weighted by control/nature/time, normalized by number of outcomes)
-        weighted_assumption_load = 0.0
+        # 4. Per-outcome analysis: redundancy, conditional depth penalties, joint SPOFs
+        # Precompute per-node weights
         per_node_weights: Dict[str, float] = {}
         for n in assumptions:
             cw = self.CONTROL_WEIGHTS.get(getattr(n, 'control', ''), 1.0)
             nw = self.NATURE_WEIGHTS.get(getattr(n, 'nature', ''), 1.0)
             tw = self.TIME_WEIGHTS.get(getattr(n, 'time_sensitivity', ''), 1.0)
-            weight = (cw * nw * tw) ** (1.0 / 3.0)
-            per_node_weights[n.id] = weight
-            weighted_assumption_load += weight
+            per_node_weights[n.id] = (cw * nw * tw) ** (1.0 / 3.0)
 
+        # adjacency already defined as 'outgoing'
+        def enumerate_paths(start: str, target: str, max_paths: int = 200, max_len: int =  self.PATH_MAX_LENGTH):
+            results: List[List[str]] = []
+            stack: List[Tuple[str, List[str]]] = [(start, [start])]
+            while stack and len(results) < max_paths:
+                node_id, path = stack.pop()
+                if len(path) > max_len:
+                    continue
+                if node_id == target:
+                    results.append(path)
+                    continue
+                for child in outgoing.get(node_id, []):
+                    if child in path:
+                        continue
+                    stack.append((child, path + [child]))
+            return results
+
+        def any_path_excluding(banned: Set[str], target: str) -> bool:
+            # BFS from all assumptions excluding banned nodes
+            visited = set()
+            stack = [a.id for a in assumptions if a.id not in banned]
+            while stack:
+                nid = stack.pop()
+                if nid in visited or nid in banned:
+                    continue
+                visited.add(nid)
+                if nid == target:
+                    return True
+                for child in outgoing.get(nid, []):
+                    if child not in visited and child not in banned:
+                        stack.append(child)
+            return False
+
+        effective_load_sum = 0.0
+        outcome_redundancies = {}
+        joint_spof_pairs: List[Tuple[str, str, str]] = []  # (outcome, a, b)
+        depth_path_penalties: List[float] = []
+        max_graph_depth = 0
+
+        for outcome in outcomes:
+            # collect path counts per assumption for this outcome
+            assump_path_counts: Dict[str, int] = {}
+            for a in assumptions:
+                paths = enumerate_paths(a.id, outcome.id, max_paths=200)
+                if paths:
+                    assump_path_counts[a.id] = len(paths)
+
+            total_paths = sum(assump_path_counts.values())
+            if total_paths == 0:
+                redundancy = 0.0
+            else:
+                shares = [c/total_paths for c in assump_path_counts.values()]
+                hhi = sum(s*s for s in shares)
+                redundancy = 1.0 - hhi
+            redundancy_bonus = min(self.REDUNDANCY_BONUS_CAP, redundancy * self.REDUNDANCY_BONUS_CAP)
+            outcome_redundancies[outcome.id] = {'assump_path_counts': assump_path_counts, 'redundancy': redundancy, 'redundancy_bonus': redundancy_bonus}
+
+            # effective weighted assumption load contribution for this outcome
+            outcome_assump_weight = sum(per_node_weights.get(aid, 1.0) for aid in assump_path_counts.keys())
+            effective_load_sum += outcome_assump_weight * (1.0 - redundancy_bonus)
+
+            # joint SPOF detection among top-K candidate assumptions
+            candidates = sorted(assump_path_counts.items(), key=lambda x: x[1], reverse=True)[:self.JOINT_SPOF_K]
+            cand_ids = [c[0] for c in candidates]
+            for i in range(len(cand_ids)):
+                for j in range(i+1, len(cand_ids)):
+                    a_i = cand_ids[i]
+                    a_j = cand_ids[j]
+                    if not any_path_excluding({a_i, a_j}, outcome.id):
+                        e_i = node_map[a_i].evidence_strength
+                        e_j = node_map[a_j].evidence_strength
+                        if (e_i + e_j) / 2.0 < self.JOINT_SPOF_EVIDENCE_THRESHOLD:
+                            joint_spof_pairs.append((outcome.id, a_i, a_j))
+                            fragility_components.setdefault('joint_spofs', []).append({'outcome': outcome.id, 'pair': (a_i, a_j), 'avg_evidence': (e_i+e_j)/2.0})
+                            # record joint SPOF pair as a traceable failure token
+                            single_point_failures.append(f"joint:{a_i}+{a_j}")
+
+            # enumerate long paths and compute path-level depth penalties
+            # collect penalties for this outcome
+            path_penalties_local: List[float] = []
+            for a_id in assump_path_counts.keys():
+                paths = enumerate_paths(a_id, outcome.id, max_paths=200)
+                for p in paths:
+                    length = len(p)
+                    if length <= self.DEPTH_PENALTY_THRESHOLD:
+                        continue
+                    max_graph_depth = max(max_graph_depth, length)
+                    # path evidence = geometric mean of node evidence strengths
+                    evs = [node_map[nid].evidence_strength for nid in p]
+                    # avoid zeros by clipping small epsilon
+                    evs = [max(1e-6, e) for e in evs]
+                    path_ev = math.exp(sum(math.log(e) for e in evs) / len(evs))
+                    control_exposure = sum(1 for nid in p if getattr(node_map[nid], 'control', '') in ('Macro', 'Exogenous')) / len(p)
+                    path_pen = (length - self.DEPTH_PENALTY_THRESHOLD) * self.DEPTH_PENALTY_PER_LAYER * (1.0 - path_ev) * (1.0 + control_exposure)
+                    path_penalties_local.append(path_pen)
+            if path_penalties_local:
+                depth_path_penalties.append(sum(path_penalties_local) / len(path_penalties_local))
+
+        # finalize assumption load component (average across outcomes)
         if outcomes:
-            load_component = min(
-                self.MAX_FRAGILITY_ASSUMPTION_LOAD,
-                (weighted_assumption_load / len(outcomes)) * self.ASSUMPTION_LOAD_SCALE_FACTOR
-            )
+            avg_effective_load = (effective_load_sum / len(outcomes))
+            load_component = min(self.MAX_FRAGILITY_ASSUMPTION_LOAD, avg_effective_load * self.ASSUMPTION_LOAD_SCALE_FACTOR)
         else:
             load_component = 0.0
+        fragility_score = 0.0
+        fragility_components = {}
         fragility_score += load_component
         fragility_components['assumption_load'] = load_component
-        fragility_components['assumption_load_weighted'] = weighted_assumption_load
+        fragility_components['assumption_load_effective'] = avg_effective_load if outcomes else 0.0
 
-        # Component 2: Graph depth (penalize above threshold)
-        if max_graph_depth > self.DEPTH_PENALTY_THRESHOLD:
-            depth_component = min(
-                self.MAX_FRAGILITY_GRAPH_DEPTH,
-                (max_graph_depth - self.DEPTH_PENALTY_THRESHOLD) * self.DEPTH_PENALTY_PER_LAYER
-            )
+        # depth component: average path penalty (bounded)
+        if depth_path_penalties:
+            depth_component = min(self.MAX_FRAGILITY_GRAPH_DEPTH, sum(depth_path_penalties) / len(depth_path_penalties))
         else:
             depth_component = 0.0
         fragility_score += depth_component
         fragility_components['graph_depth'] = depth_component
 
-        # Component 3: Single-point failures (consider control/nature multipliers for thresholding)
+        # Node-level SPOF (consider control/nature multipliers for thresholding) - keep existing behavior
         spof_hits = 0
         for node_id, pc in path_concentration.items():
             node = node_map[node_id]
@@ -932,25 +1013,43 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         fragility_score += spof_component
         fragility_components['single_point_failures'] = spof_component
 
+        # joint SPOF penalty
+        joint_spof_count = len(joint_spof_pairs)
+        joint_spof_penalty = min(self.JOINT_SPOF_PENALTY_MAX, joint_spof_count * (self.JOINT_SPOF_PENALTY_MAX / max(1, self.JOINT_SPOF_K)))
+        fragility_score += joint_spof_penalty
+        fragility_components['joint_spof_penalty'] = joint_spof_penalty
+
+        # record redundancy info
+        fragility_components['redundancy'] = outcome_redundancies
+
         # Component 4: Evidence strength (importance-weighted across nodes)
         # Use path_concentration-derived importance to weight evidence by structural impact
         max_pc = max(path_concentration.values()) if path_concentration else 1
         importance_norm: Dict[str, float] = {nid: (pc / max_pc if max_pc else 0.0) for nid, pc in path_concentration.items()}
 
+        # Exclude nodes already captured as SPOFs or joint-SPOFs from systemic evidence calculation
+        joint_nodes = set(a for (_, a, b) in joint_spof_pairs) | set(b for (_, a, b) in joint_spof_pairs)
+        node_spof_nodes = set(n for n in single_point_failures if isinstance(n, str) and not n.startswith('joint:'))
+        excluded_nodes = joint_nodes | node_spof_nodes
+
         total_weighted_evidence = 0.0
         total_weights = 0.0
         critical_low_nodes: List[str] = []
         for n in nodes:
-            base_w = per_node_weights.get(n.id, 1.0)
             imp = importance_norm.get(n.id, 0.0)
+            # detect critical low evidence nodes (high importance + low evidence)
+            if imp >= self.CRITICAL_IMPORTANCE_THRESHOLD and n.evidence_strength < self.CRITICAL_EVIDENCE_THRESHOLD:
+                critical_low_nodes.append(n.id)
+
+            if n.id in excluded_nodes:
+                # skip nodes already counted by SPOF/joint-SPOF
+                continue
+
+            base_w = per_node_weights.get(n.id, 1.0)
             importance_factor = 1.0 + imp  # ranges from 1.0 .. 2.0
             combined_w = base_w * importance_factor
             total_weighted_evidence += n.evidence_strength * combined_w
             total_weights += combined_w
-
-            # detect critical low evidence nodes (high importance + low evidence)
-            if imp >= self.CRITICAL_IMPORTANCE_THRESHOLD and n.evidence_strength < self.CRITICAL_EVIDENCE_THRESHOLD:
-                critical_low_nodes.append(n.id)
 
         avg_importance_weighted_evidence = total_weighted_evidence / total_weights if total_weights else 0.0
         evidence_component = (1.0 - avg_importance_weighted_evidence) * self.MAX_FRAGILITY_EVIDENCE
@@ -958,6 +1057,7 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         fragility_components['evidence_weakness'] = evidence_component
         fragility_components['avg_importance_weighted_evidence'] = avg_importance_weighted_evidence
         fragility_components['critical_low_nodes'] = critical_low_nodes
+        fragility_components['excluded_from_evidence_component'] = list(excluded_nodes)
 
         # --- Structural confidence propagation ---
         confidence_mismatch: List[str] = []
