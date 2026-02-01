@@ -1,5 +1,5 @@
 from datetime import datetime
-from dataclasses import dataclass,field
+from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 
 # Centralized node-type constants for reuse across agents
@@ -7,28 +7,6 @@ NODE_TYPE_ASSUMPTION = "ASSUMPTION"
 NODE_TYPE_DRIVER = "DRIVER"
 NODE_TYPE_OUTCOME = "OUTCOME"
 
-
-# --- Perplexity Research
-@dataclass
-class ResearchResult:
-    """Container for research results with citations"""
-    query: str
-    content: str
-    citations: List[str] = field(default_factory=list)
-    model_used: str = ""
-    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
-    raw_response: Optional[Dict] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization"""
-        return {
-            "query": self.query,
-            "content": self.content,
-            "citations": self.citations,
-            "model_used": self.model_used,
-            "timestamp": self.timestamp,
-        }
-    
 
 # -- Stock Analytics Metrics -- 
 @dataclass
@@ -224,7 +202,6 @@ class NDGNode:
     control: str  # "Company" | "Industry" | "Macro" | "Exogenous"
     nature: str  # "Structural" | "Cyclical" | "Execution"
     time_sensitivity: str  # "Short" | "Medium" | "Long"
-    directionality: str = ""  # Optional: causal expression like 'X → Y'
     
     # 2.4 Evidence Mapping
     evidence_sources: List[Dict] = field(default_factory=list)  # List of {"type": "Quantitative/Qualitative/External", "description": str, "freshness": str}
@@ -275,6 +252,9 @@ class NDGOutput:
     confidence_consistent: bool = True  # True if confidence_sum within tolerance
     summary_text: str = ""  # Human-readable summary for UI display
     version: int = 1  # For versioning (2.7)
+    # Extracted metrics and raw claims (populated by NDG parsing). These are
+    # optional and provide a canonical, machine-readable set of assumptions
+    # that downstream agents (like CRE) should consume directly.
     extracted_metrics: Optional[Dict[str, Any]] = None
     extracted_claims: Optional[List[Dict[str, Any]]] = None
     created_at: str = None
@@ -382,7 +362,49 @@ class Scenario:
     stressed_assumptions: Dict  # Override base assumptions
     plausibility_weight: float = 0.5  # 0-1: how likely is this scenario
     detailed_reasoning: str = ""  # AI explanation of why this scenario matters
+    # Optional scenario-specific factor weight adjustments (factor -> multiplier)
     factor_weight_overrides: Optional[Dict[str, float]] = None
+
+@dataclass
+class ValuationResult:
+    """Output of financial model under a scenario"""
+    scenario_name: str
+    valuation_change: float  # -0.25 = -25%
+    outcome_tier: str  # "SURVIVES" | "IMPAIRED" | "BROKEN"
+    narrative_consistent: bool
+    margin_of_safety: float
+    plausibility_weight: float = 0.5
+    detailed_reasoning: str = ""  # Why this scenario leads to this outcome
+    # Factorized valuation diagnostics (optional)
+    factor_contributions: Optional[Dict[str, float]] = None  # factor -> contribution score (-1..1)
+    metric_to_factor_mapping: Optional[Dict[str, Dict[str, float]]] = None  # metric -> {factor: coeff}
+
+@dataclass
+class CREOutput:
+    """Counterfactual Research Engine output
+
+    Notes:
+    - `structural_survival_rate` indicates the fraction of evaluated scenarios where
+      the thesis avoided outright failure (i.e., SURVIVES or IMPAIRED). This is a
+      structural diagnostic, not an investment recommendation.
+    - `structural_fragility_score` captures the CRE's fragility assessment on a 0-1
+      scale; it reflects structural brittleness of the thesis in scenario space.
+    """
+    structural_survival_rate: float  # 0-1: fraction of scenarios where thesis avoids outright failure
+    dominant_failure_modes: List[str]
+    tail_loss_percentile: float  # Loss at configured percentile (default 5th)
+    structural_fragility_score: float  # 0-1: inverse of robustness (structural fragility)
+    scenario_results: List[ValuationResult]
+    # Additional metadata
+    weighted_survival_rate: Optional[float] = None  # Plausibility-weighted survival
+    impaired_scenarios: Optional[List[str]] = None  # Scenarios that weakened but didn't break thesis
+    summary_text: Optional[str] = None  # Generated summary of key contradictions
+    summary_structured: Optional[Dict[str, Any]] = None  # Structured summary JSON (CRE_SUMMARY_SCHEMA)
+    # Provenance & factorization diagnostics
+    defaults_applied: Optional[List[str]] = None
+    inferred_metrics: Optional[List[str]] = None
+    factor_scores: Optional[Dict[str, float]] = None  # aggregated factor contributions across scenarios
+    metric_factor_mapping: Optional[Dict[str, Dict[str, float]]] = None  # mapping of metrics -> factors
 
 @dataclass
 class CREScenarioSet:
@@ -395,6 +417,18 @@ class CREScenarioSet:
     generated_raw: Optional[List[Dict[str, Any]]] = None
     summary_text: Optional[str] = None
     total_duration_ms: Optional[float] = None
+
+@dataclass
+class CREResult:
+    """Container holding both scenario set (pre-valuation) and evaluated CRE output."""
+    scenario_set: CREScenarioSet
+    cre_output: CREOutput
+    created_at: Optional[str] = None
+
+    def __post_init__(self):
+        if not self.created_at:
+            self.created_at = datetime.now().isoformat()
+
 
 @dataclass
 class CREGenerationResult:
@@ -412,56 +446,6 @@ class CREGenerationResult:
         if not self.created_at:
             self.created_at = datetime.now().isoformat()
 
-
-# --- FT ---
-@dataclass
-class ValuationResult:
-    """Output of financial model under a scenario"""
-    scenario_name: str
-    valuation_change: float  # -0.25 = -25%
-    outcome_tier: str  # "SURVIVES" | "IMPAIRED" | "BROKEN"
-    narrative_consistent: bool
-    margin_of_safety: float
-    plausibility_weight: float = 0.5
-    detailed_reasoning: str = ""  # Why this scenario leads to this outcome
-    factor_contributions: Optional[Dict[str, float]] = None  # factor -> contribution score (-1..1)
-    metric_to_factor_mapping: Optional[Dict[str, Dict[str, float]]] = None  # metric -> {factor: coeff}
-
-@dataclass
-class CREOutput:
-    """Counterfactual Research Engine output
-
-    Notes:
-    - Aggregated, thesis-level diagnostics (survival fractions, fragility proxies,
-      tail loss) are computed by the Thesis Validity Evaluation stage (the
-      `ThesisValidityEvaluator`) from `scenario_results`. The Financial Translation
-      stage intentionally returns per-scenario `ValuationResult`s only; the
-      evaluator synthesizes these into authoritative diagnostics for downstream
-      reporting.
-    """
-    # Per-scenario results (primary output from FT)
-    scenario_results: List[ValuationResult]
-
-    # Thesis-level diagnostics are optional here and should be computed by the
-    # Aggregation & Diagnostics stage. These fields are kept for backward
-    # compatibility but are optional and may be None until aggregated.
-    structural_survival_rate: Optional[float] = None  # DEPRECATED: prefer `scenario_survival_fraction` from aggregator
-    scenario_survival_fraction: Optional[float] = None  # 0-1: fraction of evaluated scenarios where thesis avoids outright failure
-    dominant_failure_modes: Optional[List[str]] = None
-    tail_loss_percentile: Optional[float] = None  # Loss at configured percentile (default 5th)
-    structural_fragility_score: Optional[float] = None  # DEPRECATED: prefer `raw_fragility_proxy` computed by aggregator
-    raw_fragility_proxy: Optional[float] = None  # 0-1: heuristic fragility proxy
-
-    # Additional metadata
-    weighted_survival_rate: Optional[float] = None  # Plausibility-weighted survival
-    impaired_scenarios: Optional[List[str]] = None  # Scenarios that weakened but didn't break thesis
-    summary_text: Optional[str] = None  # Generated summary of key contradictions
-    summary_structured: Optional[Dict[str, Any]] = None  # Structured summary JSON (CRE_SUMMARY_SCHEMA)
-    # Provenance & factorization diagnostics
-    defaults_applied: Optional[List[str]] = None
-    inferred_metrics: Optional[List[str]] = None
-    factor_scores: Optional[Dict[str, float]] = None  # aggregated factor contributions across scenarios
-    metric_factor_mapping: Optional[Dict[str, Dict[str, float]]] = None  # mapping of metrics -> factors
 
 @dataclass
 class FTResult:
@@ -481,31 +465,44 @@ class FTResult:
             self.created_at = datetime.now().isoformat()
 
 
-# --- Thesis Validity Evaluation ---
+
+@dataclass
+class BaseAssumptions:
+    """Analyst-provided base case assumptions"""
+    revenue_growth: List[float]  # 5-year growth rates
+    gross_margin: float
+    operating_margin: float
+    net_retention: float
+    wacc: float
+    terminal_multiple: float
+
+
+@dataclass
+class ThesisInput:
+    """Analyst thesis submission"""
+    stock_ticker: str
+    narrative: str
+    base_assumptions: BaseAssumptions
+    stated_confidence: float  # 0-1
+    submission_date: str = None
+
+    def __post_init__(self):
+        if not self.submission_date:
+            self.submission_date = datetime.now().isoformat()
+
+
 @dataclass
 class ThesisValidityOutput:
-    """Output of rule-based thesis validity evaluation
-
-    Fields:
-      - `key_contradictions`: concise list of NDG + Red Team contradictions relevant to the thesis
-      - `required_conditions`: actions needed to improve status toward Valid
-
-    Note: This is a deterministic, rule-based output used to drive downstream
-    Half-Life Estimation and final reporting. It intentionally remains simple
-    and transparent for auditability.
-    """
+    """Output of rule-based thesis validity evaluation"""
     stock_ticker: str
     status: str  # "Valid" | "Fragile" | "Broken"
     reasons: List[str]
     dominant_failure_modes: List[str]
     required_conditions: List[str]
-    key_contradictions: Optional[List[str]] = None
-    survival_rate: float = 0.0
-    weighted_survival_rate: float = 0.0
-    fragility_score: float = 0.0
-    tail_loss: float = 0.0
-    impaired_scenarios: Optional[List[str]] = None
-    high_severity_challenges: int = 0
+    survival_rate: float
+    fragility_score: float
+    tail_loss: float
+    high_severity_challenges: int
     summary_text: Optional[str] = None
     created_at: Optional[str] = None
 
@@ -514,7 +511,24 @@ class ThesisValidityOutput:
             self.created_at = datetime.now().isoformat()
 
 
-# --- Idea Half-Life Estimator ---
+
+@dataclass
+class EvidenceQualityScore:
+    """Credibility and relevance scoring (4.3)"""
+    source_reliability: float  # 0-1: How trustworthy is the source
+    recurrence_score: float  # 0-1: One-off vs repeated signal
+    forward_relevance: float  # 0-1: How much does this matter for future
+    data_quality: float  # 0-1: Precision and completeness
+    overall_weight: float = 0.0  # Composite score
+    
+    def __post_init__(self):
+        # Weighted average: source most important, then recurrence
+        weights = [0.35, 0.30, 0.20, 0.15]
+        scores = [self.source_reliability, self.recurrence_score, 
+                 self.forward_relevance, self.data_quality]
+        self.overall_weight = sum(w * s for w, s in zip(weights, scores))
+
+
 @dataclass
 class ContradictionTracking:
     """Accumulation and persistence tracking (4.4)"""
@@ -526,6 +540,26 @@ class ContradictionTracking:
     persistence_score: float = 0.0  # 0-1: How persistent is the contradiction
     unresolved: bool = True  # Has management/data addressed the issue?
     contradiction_severity: str = "low"  # "low" | "medium" | "high"
+
+
+
+@dataclass
+class AssumptionHealthState:
+    """Current health of an assumption (4.6)"""
+    node_id: str
+    state: str  # "Intact" | "Under Stress" | "Impaired" | "Broken"
+    previous_state: str = "Intact"
+    state_changed_at: str = None
+    justification: str = ""  # Why this state
+    evidence_summary: str = ""  # Brief summary of evidence
+    contradiction_score: float = 0.0  # 0-1: overall contradiction level
+    
+    def __post_init__(self):
+        if not self.state_changed_at:
+            self.state_changed_at = datetime.now().isoformat()
+
+
+# --- IHLE ---
 
 @dataclass
 class AssumptionDecayRate:
@@ -541,6 +575,7 @@ class AssumptionDecayRate:
     days_since_first_contradiction: int
     evidence_persistence: float  # From DEH
 
+
 @dataclass
 class PathDecayScore:
     """Decay aggregated along causal path"""
@@ -552,6 +587,7 @@ class PathDecayScore:
     redundancy_factor: float  # 0-1, lower = more fragile
     estimated_path_half_life_months: float
 
+
 @dataclass
 class RegimeSensitivity:
     """Macro/industry regime adjustments"""
@@ -561,6 +597,7 @@ class RegimeSensitivity:
     adjustment_factor: float  # Multiplier for half-life (0.5-2.0)
     adjustment_reasoning: str
 
+
 @dataclass
 class MonitoringCadence:
     """Recommended review frequency"""
@@ -569,6 +606,7 @@ class MonitoringCadence:
     next_review_date: str  # ISO format
     priority_level: str  # "Critical" | "High" | "Medium" | "Low"
     review_justification: str
+
 
 @dataclass
 class HalfLifeEstimate:
@@ -582,12 +620,13 @@ class HalfLifeEstimate:
     time_to_first_broken: float  # Months until first assumption breaks (projected)
     regime_adjusted: bool
 
+
 @dataclass
 class IHLEOutput:
     """Complete Idea Half-Life Estimator output"""
     stock_ticker: str
     ndg_version: str
-    analysis_timestamp: str  # When the IHLE analysis was performed
+    deh_timestamp: str  # When DEH data was captured
     
     # Core estimates
     half_life_estimate: HalfLifeEstimate
@@ -606,22 +645,178 @@ class IHLEOutput:
     fastest_decay_rate: float
     slowest_decay_rate: float
     
-    # Feedback signals (pipeline annotations; generation gated via `EMIT_PIPELINE_SIGNALS`)
-    cre_scenario_weights_update: Dict[str, float]  # Updated scenario probabilities (annotation only)
-    red_team_relevance_boost: List[str]  # Node IDs with increased challenge priority (annotation only)
-    half_life_signals: Optional[dict] = None  # Aggregated signals (e.g., rapidly decaying nodes, suggested scenario weights)
-
+    # Feedback signals
+    cre_scenario_weights_update: Dict[str, float]  # Updated scenario probabilities
+    red_team_relevance_boost: List[str]  # Node IDs with increased challenge priority
+    
     # Additional metadata
     summary_text: Optional[str] = None  # Generated summary of durability analysis
-    # Per-node contribution breakdown for auditability
-    node_contributions: Optional[List[dict]] = None
-    # Monte Carlo distribution summary (optional)
-    monte_carlo: Optional[dict] = None
-    # Sensitivity analysis summary (optional)
-    sensitivity_analysis: Optional[dict] = None
+# --- CCE ---
+
+@dataclass
+class ConvictionRecord:
+    """Pre-decision conviction capture"""
+    analyst_id: str
+    stock_ticker: str
+    thesis_id: str
+    timestamp: str  # ISO format
+    stated_conviction: float  # 0-1 scale
+    conviction_percentile: int  # 0-100, where analyst ranks this vs own history
+    qualitative_confidence: str  # "Very High" | "High" | "Moderate" | "Low"
+    primary_conviction_drivers: List[str]  # Node IDs from NDG
 
 
-# --- Final Thesis Report ---
+@dataclass
+class ConvictionDecomposition:
+    """Confidence allocation across NDG structure"""
+    node_id: str
+    assumption_text: str
+    allocated_confidence: float  # Portion of total conviction
+    structural_importance: float  # From NDG fragility
+    analyst_emphasis: float  # Analyst's stated emphasis
+    evidence_strength: float  # From NDG
+    confidence_concentration: float  # % of total conviction in this node
+
+
+@dataclass
+class OutcomeAttribution:
+    """Post-fact outcome mapping to assumptions"""
+    node_id: str
+    assumption_text: str
+    original_conviction: float
+    actual_outcome: str  # "Validated" | "Invalidated" | "Indeterminate"
+    outcome_driver: str  # "Assumption Correct" | "Assumption Wrong" | "External Event" | "Luck"
+    contribution_to_result: float  # -1 to 1
+    reasoning: str
+
+
+@dataclass
+class CalibrationMetrics:
+    """Analyst calibration scoring"""
+    analyst_id: str
+    time_period: str  # e.g., "Last 12 months"
+    sample_size: int  # Number of theses evaluated
+    
+    # Core calibration metrics
+    overconfidence_score: float  # 0-1, how often stated conviction > reality
+    underconfidence_score: float  # 0-1, how often stated conviction < reality
+    brier_score: float  # Calibration error (lower = better)
+    
+    # Breakdown by confidence level
+    high_confidence_accuracy: float  # Success rate when conviction > 0.7
+    medium_confidence_accuracy: float  # Success rate when conviction 0.4-0.7
+    low_confidence_accuracy: float  # Success rate when conviction < 0.4
+    
+    # Trend
+    recent_improvement: bool  # Whether calibration improving
+    trend_direction: str  # "Improving" | "Stable" | "Degrading"
+
+
+@dataclass
+class ContextualCalibration:
+    """Domain-aware calibration adjustment"""
+    context_type: str  # "Sector" | "Business Model" | "Regime" | "Thesis Type"
+    context_value: str  # e.g., "SaaS", "Cyclical", "Growth"
+    sample_size: int
+    
+    calibration_adjustment: float  # Multiplier (0.5-1.5)
+    context_accuracy: float  # Historical accuracy in this context
+    context_overconfidence: float  # Tendency in this context
+    
+    reasoning: str
+
+
+@dataclass
+class ConvictionAdjustment:
+    """Forward-looking conviction scaling"""
+    original_conviction: float
+    
+    # Adjustment factors
+    analyst_calibration_factor: float  # From CalibrationMetrics
+    thesis_fragility_factor: float  # From CRE + NDG
+    half_life_factor: float  # From IHLE
+    context_factor: float  # From ContextualCalibration
+    
+    # Combined adjustment
+    combined_adjustment_factor: float  # Product of all factors
+    calibrated_conviction: float  # original * combined_adjustment
+    
+    # Position sizing guidance
+    suggested_position_size_factor: float  # 0.5-2.0x of baseline
+    
+    adjustment_reasoning: str
+
+
+@dataclass
+class AnalystDevelopmentSignal:
+    """Long-term learning feedback"""
+    analyst_id: str
+    time_period: str
+    
+    # Performance patterns
+    persistent_overconfidence_areas: Optional[List[str]] = None  # Contexts where consistently overconfident
+    persistent_underconfidence_areas: Optional[List[str]] = None  # Contexts where consistently underconfident
+    
+    # Improvement tracking
+    calibration_trajectory: str = "Stable"  # "Improving" | "Stable" | "Declining"
+    strongest_domains: Optional[List[str]] = None  # Contexts with best calibration
+    weakest_domains: Optional[List[str]] = None  # Contexts with worst calibration
+    
+    # Actionable insights
+    development_priorities: Optional[List[str]] = None
+    recent_blind_spots: Optional[List[str]] = None
+    
+    # Privacy preserved
+    peer_comparison_percentile: int = 50  # Optional, 0-100
+    
+    def __post_init__(self):
+        if self.persistent_overconfidence_areas is None:
+            self.persistent_overconfidence_areas = []
+        if self.persistent_underconfidence_areas is None:
+            self.persistent_underconfidence_areas = []
+        if self.strongest_domains is None:
+            self.strongest_domains = []
+        if self.weakest_domains is None:
+            self.weakest_domains = []
+        if self.development_priorities is None:
+            self.development_priorities = []
+        if self.recent_blind_spots is None:
+            self.recent_blind_spots = []
+
+@dataclass
+class CCEOutput:
+    """Complete Conviction Calibration Engine output"""
+    stock_ticker: str
+    analyst_id: str
+    timestamp: str
+    
+    # Pre-decision state
+    conviction_record: ConvictionRecord
+    conviction_decomposition: List[ConvictionDecomposition]
+    
+    # Historical performance (if available)
+    calibration_metrics: CalibrationMetrics
+    contextual_calibrations: List[ContextualCalibration]
+    
+    # Forward adjustment
+    conviction_adjustment: ConvictionAdjustment
+    
+    # Development feedback
+    development_signal: AnalystDevelopmentSignal
+    
+    # Summary metrics
+    original_conviction: float
+    calibrated_conviction: float
+    adjustment_magnitude: float  # Absolute change
+    position_size_recommendation: str  # "Reduce" | "Maintain" | "Increase"
+    
+    # Integration with other modules
+    cre_survival_rate: float  # From CRE
+    ndg_fragility: float  # From NDG
+    deh_contradiction_rate: float  # From DEH
+    ihle_half_life_months: float  # From IHLE
+
+
 @dataclass
 class FinalThesisReport:
     """Final output for PM / Investment Committee"""
