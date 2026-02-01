@@ -115,6 +115,13 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
     # Importance thresholds for critical evidence detection
     CRITICAL_IMPORTANCE_THRESHOLD: float = 0.5  # normalized importance (0-1)
     CRITICAL_EVIDENCE_THRESHOLD: float = 0.5  # evidence strength below which node is critical
+
+    # Confidence-importance mismatch thresholds and penalty
+    CONFIDENCE_HIGH: float = 0.7
+    CONFIDENCE_LOW: float = 0.3
+    IMPORTANCE_LOW: float = 0.2
+    IMPORTANCE_HIGH: float = 0.5
+    CONFIDENCE_LOW_PENALTY_PER_NODE: float = 0.02
     
     # Assumption load scaling factor (per outcome)
     ASSUMPTION_LOAD_SCALE_FACTOR: float = 0.05
@@ -951,6 +958,35 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         fragility_components['evidence_weakness'] = evidence_component
         fragility_components['avg_importance_weighted_evidence'] = avg_importance_weighted_evidence
         fragility_components['critical_low_nodes'] = critical_low_nodes
+
+        # --- Structural confidence propagation ---
+        confidence_mismatch: List[str] = []
+        max_imp = max(importance_norm.values()) if importance_norm else 0.0
+        total_norm_conf = 0.0
+        for n in nodes:
+            imp = importance_norm.get(n.id, 0.0)
+            eff_conf = n.confidence * (1.0 + imp)
+            # normalized effective confidence to keep scale bounded
+            denom = 1.0 + max_imp if max_imp > 0 else 1.0
+            norm_eff = eff_conf / denom
+            n.effective_confidence = eff_conf
+            total_norm_conf += norm_eff
+
+            # detect mismatches
+            if n.confidence >= self.CONFIDENCE_HIGH and imp <= self.IMPORTANCE_LOW:
+                confidence_mismatch.append(f"high_conf_low_imp:{n.id}")
+            if n.confidence <= self.CONFIDENCE_LOW and imp >= self.IMPORTANCE_HIGH:
+                confidence_mismatch.append(f"low_conf_high_imp:{n.id}")
+
+        confidence_structural_exposure = total_norm_conf
+        fragility_components['confidence_structural_exposure'] = confidence_structural_exposure
+        fragility_components['confidence_mismatches'] = confidence_mismatch
+
+        # Penalize low-confidence high-importance nodes modestly
+        penalty_count = sum(1 for m in confidence_mismatch if m.startswith('low_conf_high_imp'))
+        penalty_total = min(1.0, penalty_count * self.CONFIDENCE_LOW_PENALTY_PER_NODE)
+        fragility_score += penalty_total
+        fragility_components['confidence_mismatch_penalty'] = penalty_total
         
         # Apply loop-based adjustments
         fragility_components['feedback_loops_bonus'] = loop_bonus_total

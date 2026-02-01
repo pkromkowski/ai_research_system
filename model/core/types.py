@@ -234,6 +234,7 @@ class NDGNode:
     # 2.5 Confidence Attribution
     confidence: float = 0.0  # 0-1: analyst confidence in this specific claim
     confidence_basis: str = ""  # Why this confidence level (certainty markers)
+    effective_confidence: float = 0.0  # Structural-weighted confidence (computed by NDG)
     
     # Note: default_factory ensures list fields are non-null and avoids the need
     # for ad-hoc __post_init__ initializers used previously. (Cleaner & safer.)
@@ -274,6 +275,7 @@ class FragilityMetrics:
     fragility_components: Optional[Dict[str, float]] = None  # Breakdown by component (optional)
     feedback_loops: List[FeedbackLoop] = field(default_factory=list)  # Detected feedback loops
     critical_low_evidence_nodes: List[str] = field(default_factory=list)  # Nodes with high importance but low evidence
+    confidence_mismatch_nodes: List[str] = field(default_factory=list)  # Nodes where confidence and importance mismatch
 
 @dataclass
 class NDGOutput:
