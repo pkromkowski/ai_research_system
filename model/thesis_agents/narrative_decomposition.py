@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 from collections import defaultdict
 from typing import List, Dict, Set, Tuple, Optional, Any
 
@@ -92,6 +93,28 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
     LOOP_EVIDENCE_THRESHOLD: float = 0.6
     LOOP_REINFORCEMENT_BONUS_MAX: float = 0.1
     LOOP_WEAKNESS_PENALTY_MAX: float = 0.1
+
+    # Weight maps to adjust fragility by controllability/nature/time (conservative defaults)
+    CONTROL_WEIGHTS: Dict[str, float] = {
+        "Company": 0.6,
+        "Industry": 0.9,
+        "Macro": 1.0,
+        "Exogenous": 1.2
+    }
+    NATURE_WEIGHTS: Dict[str, float] = {
+        "Structural": 0.8,
+        "Cyclical": 1.0,
+        "Execution": 1.05
+    }
+    TIME_WEIGHTS: Dict[str, float] = {
+        "Short": 0.9,
+        "Medium": 1.0,
+        "Long": 1.05
+    }
+
+    # Importance thresholds for critical evidence detection
+    CRITICAL_IMPORTANCE_THRESHOLD: float = 0.5  # normalized importance (0-1)
+    CRITICAL_EVIDENCE_THRESHOLD: float = 0.5  # evidence strength below which node is critical
     
     # Assumption load scaling factor (per outcome)
     ASSUMPTION_LOAD_SCALE_FACTOR: float = 0.05
@@ -845,41 +868,89 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         fragility_score = 0.0
         fragility_components = {}
         
-        # Component 1: Assumption load (normalized by number of outcomes)
+        # Component 1: Assumption load (weighted by control/nature/time, normalized by number of outcomes)
+        weighted_assumption_load = 0.0
+        per_node_weights: Dict[str, float] = {}
+        for n in assumptions:
+            cw = self.CONTROL_WEIGHTS.get(getattr(n, 'control', ''), 1.0)
+            nw = self.NATURE_WEIGHTS.get(getattr(n, 'nature', ''), 1.0)
+            tw = self.TIME_WEIGHTS.get(getattr(n, 'time_sensitivity', ''), 1.0)
+            weight = (cw * nw * tw) ** (1.0 / 3.0)
+            per_node_weights[n.id] = weight
+            weighted_assumption_load += weight
+
         if outcomes:
             load_component = min(
-                self.MAX_FRAGILITY_ASSUMPTION_LOAD, 
-                (assumption_load / len(outcomes)) * self.ASSUMPTION_LOAD_SCALE_FACTOR
+                self.MAX_FRAGILITY_ASSUMPTION_LOAD,
+                (weighted_assumption_load / len(outcomes)) * self.ASSUMPTION_LOAD_SCALE_FACTOR
             )
         else:
             load_component = 0.0
         fragility_score += load_component
         fragility_components['assumption_load'] = load_component
-        
+        fragility_components['assumption_load_weighted'] = weighted_assumption_load
+
         # Component 2: Graph depth (penalize above threshold)
         if max_graph_depth > self.DEPTH_PENALTY_THRESHOLD:
             depth_component = min(
-                self.MAX_FRAGILITY_GRAPH_DEPTH, 
+                self.MAX_FRAGILITY_GRAPH_DEPTH,
                 (max_graph_depth - self.DEPTH_PENALTY_THRESHOLD) * self.DEPTH_PENALTY_PER_LAYER
             )
         else:
             depth_component = 0.0
         fragility_score += depth_component
         fragility_components['graph_depth'] = depth_component
-        
-        # Component 3: Single-point failures
-        spof_component = min(
-            self.MAX_FRAGILITY_SPOF, 
-            len(single_point_failures) * self.SPOF_CONTRIBUTION_PER_FAILURE
-        )
+
+        # Component 3: Single-point failures (consider control/nature multipliers for thresholding)
+        spof_hits = 0
+        for node_id, pc in path_concentration.items():
+            node = node_map[node_id]
+            cw = self.CONTROL_WEIGHTS.get(getattr(node, 'control', ''), 1.0)
+            nw = self.NATURE_WEIGHTS.get(getattr(node, 'nature', ''), 1.0)
+            node_risk_multiplier = cw * nw
+            threshold_adj = self.SPOF_EVIDENCE_THRESHOLD * node_risk_multiplier
+            if (pc >= self.SPOF_MIN_PATH_COUNT and node.evidence_strength < threshold_adj):
+                spof_hits += 1
+                single_point_failures.append(node_id)
+                spof_details.append({
+                    'node_id': node.id,
+                    'claim': node.claim,
+                    'path_count': pc,
+                    'evidence_strength': node.evidence_strength,
+                    'control_weight': cw,
+                    'nature_weight': nw,
+                    'threshold_adj': threshold_adj
+                })
+        spof_component = min(self.MAX_FRAGILITY_SPOF, spof_hits * self.SPOF_CONTRIBUTION_PER_FAILURE)
         fragility_score += spof_component
         fragility_components['single_point_failures'] = spof_component
-        
-        # Component 4: Average evidence strength (inverse)
-        avg_evidence = sum(n.evidence_strength for n in nodes) / len(nodes) if nodes else 0.0
-        evidence_component = (1.0 - avg_evidence) * self.MAX_FRAGILITY_EVIDENCE
+
+        # Component 4: Evidence strength (importance-weighted across nodes)
+        # Use path_concentration-derived importance to weight evidence by structural impact
+        max_pc = max(path_concentration.values()) if path_concentration else 1
+        importance_norm: Dict[str, float] = {nid: (pc / max_pc if max_pc else 0.0) for nid, pc in path_concentration.items()}
+
+        total_weighted_evidence = 0.0
+        total_weights = 0.0
+        critical_low_nodes: List[str] = []
+        for n in nodes:
+            base_w = per_node_weights.get(n.id, 1.0)
+            imp = importance_norm.get(n.id, 0.0)
+            importance_factor = 1.0 + imp  # ranges from 1.0 .. 2.0
+            combined_w = base_w * importance_factor
+            total_weighted_evidence += n.evidence_strength * combined_w
+            total_weights += combined_w
+
+            # detect critical low evidence nodes (high importance + low evidence)
+            if imp >= self.CRITICAL_IMPORTANCE_THRESHOLD and n.evidence_strength < self.CRITICAL_EVIDENCE_THRESHOLD:
+                critical_low_nodes.append(n.id)
+
+        avg_importance_weighted_evidence = total_weighted_evidence / total_weights if total_weights else 0.0
+        evidence_component = (1.0 - avg_importance_weighted_evidence) * self.MAX_FRAGILITY_EVIDENCE
         fragility_score += evidence_component
         fragility_components['evidence_weakness'] = evidence_component
+        fragility_components['avg_importance_weighted_evidence'] = avg_importance_weighted_evidence
+        fragility_components['critical_low_nodes'] = critical_low_nodes
         
         # Apply loop-based adjustments
         fragility_components['feedback_loops_bonus'] = loop_bonus_total
@@ -902,7 +973,7 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         fragility_score = min(1.0, max(0.0, fragility_score))
         fragility_components['total'] = fragility_score
 
-        logger.info(f"Computed fragility: {fragility_score:.2f}; loops={len(loops_objs)}")
+        logger.info(f"Computed fragility: {fragility_score:.2f}; loops={len(loops_objs)}; critical_low={len(critical_low_nodes)}")
         return FragilityMetrics(
             assumption_load=assumption_load,
             avg_assumptions_per_outcome=avg_assumptions_per_outcome,
@@ -911,7 +982,8 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
             max_graph_depth=max_graph_depth,
             fragility_score=fragility_score,
             fragility_components=fragility_components,
-            feedback_loops=loops_objs
+            feedback_loops=loops_objs,
+            critical_low_evidence_nodes=critical_low_nodes
         )
     
     # --- 2.7 MAIN PIPELINE ---

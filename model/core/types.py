@@ -273,6 +273,7 @@ class FragilityMetrics:
     fragility_score: float  # 0-1: overall structural brittleness
     fragility_components: Optional[Dict[str, float]] = None  # Breakdown by component (optional)
     feedback_loops: List[FeedbackLoop] = field(default_factory=list)  # Detected feedback loops
+    critical_low_evidence_nodes: List[str] = field(default_factory=list)  # Nodes with high importance but low evidence
 
 @dataclass
 class NDGOutput:
