@@ -1,6 +1,4 @@
-"""
-Thesis Validation Framework - prompts used by thesis validation agents.
-"""
+"""Thesis Validation Prompts."""
 
 # --- SYSTEM CONTEXT - Investment Philosophy Framing ---
 INVESTMENT_ANALYST_SYSTEM_PROMPT = (
@@ -9,10 +7,9 @@ INVESTMENT_ANALYST_SYSTEM_PROMPT = (
     " Be professional and concise."
 )
 
-
 # --- NARRATIVE DECOMPOSITION GRAPH (NDG) PROMPTS ---
 NDG_PARSE_THESIS_PROMPT = """As a senior equity research analyst focused on long-term fundamental 
-investing, you are deconstructing an investment thesis for {stock_ticker} to expose its 
+investing, you are deconstructing an investment thesis for stock ticker ${stock_ticker} to expose its 
 underlying logic and assumptions.
 
 Your task is to extract the EXPLICIT causal claims embedded in this thesis - the beliefs 
@@ -41,7 +38,7 @@ ANALYTICAL DISCIPLINE:
 - Preserve the thesis author's level of specificity (don't add precision they didn't claim)"""
 
 NDG_BUILD_DAG_PROMPT = """As a senior equity research analyst, you are constructing a causal dependency 
-graph for {stock_ticker}'s investment thesis. This graph will expose the logical structure of the 
+graph for stock ticker ${stock_ticker}'s investment thesis. This graph will expose the logical structure of the 
 thesis - revealing which assumptions are load-bearing and where fragility may hide.
 
 Think of this as building a "dependency tree" for the investment outcome. If any root assumption 
@@ -79,7 +76,7 @@ QUALITY CHECKS:
 - High-strength edges on shallow paths indicate concentrated risk"""
 
 NDG_CLASSIFY_ASSUMPTIONS_PROMPT = """As a senior equity research analyst, classify each assumption in 
-{stock_ticker}'s thesis along three critical dimensions. This classification determines what can break 
+stock ticker ${stock_ticker}'s thesis along three critical dimensions. This classification determines what can break 
 the thesis and what the analyst can monitor vs. what is outside their control.
 
 Long-term investing success depends heavily on correctly assessing what you CAN'T control and what 
@@ -110,7 +107,7 @@ decisions, it's NOT exogenous.
 - "Medium": 1-3 years - requires patience to see results
 - "Long": 3+ years - structural thesis elements that unfold slowly"""
 
-NDG_MAP_EVIDENCE_PROMPT = """As a senior equity research analyst performing due diligence on {stock_ticker}, 
+NDG_MAP_EVIDENCE_PROMPT = """As a senior equity research analyst performing due diligence on stock ticker ${stock_ticker}, 
 you are now mapping the EVIDENCE landscape for each thesis claim. This is critical work: many 
 investment theses fail not because the logic was wrong, but because the supporting evidence was 
 weaker than assumed.
@@ -146,7 +143,7 @@ ANALYTICAL GUIDANCE:
 • One contradicting datapoint doesn't break a thesis, but patterns of contradiction do"""
 
 NDG_DISTRIBUTE_CONFIDENCE_PROMPT = """As a senior equity research analyst, analyze the CONFIDENCE 
-distribution in this investment thesis for {stock_ticker}. Your goal is to surface where the 
+distribution in this investment thesis for stock ticker ${stock_ticker}. Your goal is to surface where the 
 thesis author is most certain - and whether that certainty is warranted by evidence.
 
 Overconfidence is the silent killer of long-term returns. High conviction with weak evidence 
@@ -181,7 +178,6 @@ ANALYTICAL DISCIPLINE:
 • High confidence is not wrong - it's only wrong when unsupported by evidence
 • The "evidence_match" field compares your confidence reading to the evidence strength from earlier analysis"""
 
-
 # --- AI RED TEAM (RTA) PROMPTS ---
 RTA_RETRIEVE_ANALOGS_PROMPT = """As a senior equity research analyst with deep knowledge of 
 investment history, you are searching for CAUTIONARY PRECEDENTS - cases where a structurally 
@@ -189,7 +185,7 @@ similar investment thesis failed.
 
 "History doesn't repeat, but it rhymes." Your job is to find the rhymes.
 
-COMPANY BEING ANALYZED: {stock_ticker}
+STOCK TICKER ANALYZED: ${stock_ticker}
 COMPANY CONTEXT: {company_context}
 
 ASSUMPTION BEING CHALLENGED:
@@ -260,15 +256,20 @@ Extract and structure the failure mechanism. Prefer one of the taxonomy categori
 - Include timeframes where possible: "6 months before headline growth slowed"
 - These become the watchlist for the current thesis
 
+**7. IS_DOWNSIDE_TRANSFERABLE** - Is this a downside risk failure or upside scenario failure?
+- True: Downside risks that transfer reliably (margin compression, demand shocks, competitive pressure, switching cost erosion)
+- False: Upside scenarios that failed (turnarounds, innovation breakthroughs, strategic transformations, TAM expansion)
+- Key distinction: Did the company fail to avoid a risk, or fail to achieve an upside?
+
 ANALYTICAL VALUE: The goal is not to predict the future, but to know what to watch for. 
-What signals, if they appeared for {stock_ticker}, should trigger a thesis review? Return a JSON object with keys: `category`, `category_confidence`, `taxonomy_match`, `alternative_category` (or null), `description`, and `early_warnings`."""
+What signals, if they appeared for stock ticker ${stock_ticker}, should trigger a thesis review? Return a JSON object with keys: `category`, `category_confidence`, `taxonomy_match`, `alternative_category` (or null), `description`, `early_warnings`, and `is_downside_transferable`."""
 
 RTA_SCORE_RELEVANCE_PROMPT = """As a senior equity research analyst, score how RELEVANT this 
 historical analog is to the current investment case. Not all failures are instructive - 
 some occurred in contexts too different to provide useful signal.
 
 **CURRENT CASE:**
-Stock: {stock_ticker}
+Stock Ticker: ${stock_ticker}
 Context: {company_context}
 Assumption: "{assumption_claim}"
 Control: {control}
@@ -360,16 +361,15 @@ NOT: "The analyst has made a critical error in assuming..."
 
 Return plain text only (no JSON)."""
 
-
 # --- COUNTERFACTUAL RESEARCH ENGINE (CRE) PROMPTS ---
 CRE_BOUND_ASSUMPTIONS_PROMPT = """As a senior equity research analyst with deep experience in 
-{stock_ticker}'s sector, you are setting EMPIRICALLY-GROUNDED bounds for each assumption.
+stock ticker ${stock_ticker}'s sector, you are setting EMPIRICALLY-GROUNDED bounds for each assumption.
 
 This is the most critical step in stress testing. Fantasy bounds (revenue can grow 500%!) produce 
 worthless scenario analysis. Your bounds must be anchored in HISTORICAL REALITY - what has 
-actually happened to companies like {stock_ticker} under various conditions.
+actually happened to companies like stock ticker ${stock_ticker} under various conditions.
 
-COMPANY: {stock_ticker}
+STOCK TICKER: ${stock_ticker}
 CONTEXT: {company_context}
 
 {quantitative_context}
@@ -382,10 +382,10 @@ QUALITATIVE CLAIMS:
 
 For EACH metric, provide EMPIRICALLY-GROUNDED bounds:
 
-**1. LOWER BOUND**: What's the worst sustained outcome for {stock_ticker} or structurally 
+**1. LOWER BOUND**: What's the worst sustained outcome for stock ticker ${stock_ticker} or structurally 
 similar peers? NOT a one-quarter blip, but a scenario that persists.
 - Cite SPECIFIC historical analogs: company name, time period, actual numbers
-- Example: "During the 2022 SaaS correction, {stock_ticker} saw growth drop from 68% to 29%"
+- Example: "During the 2022 correction, stock ticker ${stock_ticker} saw growth drop from 68% to 29%"
 
 **2. UPPER BOUND**: What's the best sustained outcome achievable? Not a one-off spike.
 - Again cite SPECIFIC historical analogs
@@ -394,7 +394,7 @@ similar peers? NOT a one-quarter blip, but a scenario that persists.
 **3. JUSTIFICATION**: Real historical data with dates and figures. No hand-waving.
 
 GUIDANCE ON USING QUANTITATIVE CONTEXT:
-The data above shows {stock_ticker}'s ACTUAL recent performance (growth, margins, trends). 
+The data above shows stock ticker ${stock_ticker}'s ACTUAL recent performance (growth, margins, trends). 
 Use this as a sanity check - if the thesis assumes 25% revenue growth but trailing growth 
 is 8%, that's a material gap requiring explanation.
 
@@ -407,7 +407,7 @@ HARD CONSTRAINTS (violations indicate unrealistic thesis):
 - Terminal multiple: 5x to 25x (empirical range for mature companies) — use as bounding range only; do NOT substitute a single default if terminal multiple is not inferable"""
 
 CRE_GENERATE_SCENARIOS_PROMPT = """As a senior equity research analyst, you are constructing 
-PLAUSIBLE stress scenarios for {stock_ticker}'s thesis. These scenarios will test whether 
+PLAUSIBLE stress scenarios for stock ticker ${stock_ticker}'s thesis. These scenarios will test whether 
 the investment survives realistic adversity.
 
 Good stress testing asks: "What specific, historically-grounded adversity could this thesis face?"
@@ -426,7 +426,7 @@ not covered by the templates - create scenarios that stress-test those specific 
 
 The goal is to stress-test THIS THESIS, not to fill a checklist.
 
-COMPANY: {stock_ticker}
+Stock Ticker: ${stock_ticker}
 
 {quantitative_context}
 
@@ -463,9 +463,8 @@ For additive changes (percentage point shifts):
 - Would an investment committee find this scenario credible?
 - Is there a plausible path from "today" to "this scenario"?"""
 
-
 # --- Financial Translation Agent (FTA) PROMPTS ---
-CRE_GENERATE_REASONING_PROMPT = """Analyze why this counterfactual scenario leads to the given valuation outcome for {stock_ticker}.
+FT_GENERATE_REASONING_PROMPT = """Analyze why this counterfactual scenario leads to the given valuation outcome for stock ticker ${stock_ticker}.
 
 SCENARIO: {scenario_name}
 {scenario_description}
@@ -482,18 +481,25 @@ OUTCOME TIER: {outcome_tier}
 
 Return a JSON object with keys: `explanation` (2-3 sentence causal chain), `key_drivers` (array of 2-3 most important drivers), `historical_precedent` (a concise historical example or analog), `related_factors` (list of factor names referenced in reasoning), and `factor_explanation` (2-3 sentence explanation tying factor movements to valuation). Use the structured schema provided for this prompt."""
 
-METRIC_TO_FACTOR_CLASSIFICATION_PROMPT = """You are a domain expert mapping thesis metrics to canonical value factors.
+METRICS_BATCH_CLASSIFICATION_PROMPT = """You are a domain expert mapping thesis metrics to canonical value factors.
 
-Given a metric name and (optional) value context, return a JSON object that lists the factor(s) this metric most influences and a coefficient for each factor in the range -1.0..1.0 indicating direction and relative strength. Also include a `confidence` (0.0-1.0) and a short `explanation`.
+Given a list of metrics (with optional values), return a JSON array where each element classifies one metric into factor influences.
 
-Metric: {metric}
-Metric value (optional): {metric_value}
+For each metric, provide:
+- `metric`: the metric name
+- `factor_influences`: object mapping factors to coefficients (-1.0 to 1.0)
+- `confidence`: your confidence in this classification (0.0-1.0)
+- `explanation`: brief rationale (optional)
+
 Company/context: {company_context}
 
-Return a JSON object matching the provided schema and do not add extra keys."""
+Metrics to classify:
+{metrics_json}
 
-CRE_SUMMARY_PROMPT = """As a senior equity research analyst presenting stress test findings, 
-summarize the key contradictions revealed by the scenario analysis for {stock_ticker}.
+Return a JSON array matching the provided schema. Each element should have the same metric name from the input."""
+
+FT_SUMMARY_PROMPT = """As a senior equity research analyst presenting stress test findings, 
+summarize the key contradictions revealed by the scenario analysis for stock ticker ${stock_ticker}.
 
 This summary is for the investment committee. Focus on what matters most: where does the 
 thesis break, and what did the analyst potentially miss?
@@ -519,10 +525,9 @@ Additionally, include an explicit diagnostic section in the JSON for `defaults_a
 
 Use the schema carefully and ensure all fields are filled with concise, factual statements."""
 
-
 # --- IDEA HALF-LIFE ESTIMATOR (IHLE) PROMPTS ---
 IHLE_ADJUST_REGIME_PROMPT = """As a senior equity research analyst with macro awareness, assess 
-how the current macroeconomic regime affects this thesis for {stock_ticker}.
+how the current macroeconomic regime affects this thesis for stock ticker ${stock_ticker}.
 
 Some theses are regime-dependent - they work in certain macro conditions but fail in others.
 Understanding this dependency is critical for estimating thesis durability.

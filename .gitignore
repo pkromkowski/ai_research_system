@@ -1,0 +1,41 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Environment variables and secrets
+.env
+.env.local
+.env.*.local
+
+# IDE and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+.jupyter/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Project-specific folders with downloaded/generated content
+model/documents/*
+scripts/
+web_app/
+
+# Case study and personal documents
+*.pdf
+ai-quant-researcher-case-study-q1-2026.pdf

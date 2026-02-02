@@ -4,26 +4,21 @@ import logging
 from collections import defaultdict
 from typing import List, Dict, Set, Tuple, Optional, Any
 
-from model.thesis_agents.pipeline_helpers import LLMHelperMixin
+from model.thesis_agents.llm_helper import LLMHelperMixin
 from model.core.types import (
-    NDGNode, NDGEdge, FragilityMetrics, FeedbackLoop, NDGOutput, ThesisQuantitativeContext, ThesisInput,
-    NODE_TYPE_ASSUMPTION as CT_NODE_ASSUMPTION,
-    NODE_TYPE_DRIVER as CT_NODE_DRIVER,
-    NODE_TYPE_OUTCOME as CT_NODE_OUTCOME,
+    CT_NODE_ASSUMPTION, CT_NODE_DRIVER, CT_NODE_OUTCOME,
+    CONTROL_COMPANY, CONTROL_INDUSTRY, CONTROL_MACRO, CONTROL_EXOGENOUS,
+    NATURE_STRUCTURAL, NATURE_CYCLICAL, NATURE_EXECUTION,
+    TIME_SENSITIVITY_SHORT, TIME_SENSITIVITY_MEDIUM, TIME_SENSITIVITY_LONG,
+    NDGNode, NDGEdge, FragilityMetrics, FeedbackLoop, NDGOutput, ThesisQuantitativeContext
 )
 from model.prompts.thesis_validation_prompts import (
-    NDG_PARSE_THESIS_PROMPT,
-    NDG_BUILD_DAG_PROMPT,
-    NDG_CLASSIFY_ASSUMPTIONS_PROMPT,
-    NDG_MAP_EVIDENCE_PROMPT,
-    NDG_DISTRIBUTE_CONFIDENCE_PROMPT,
+    NDG_PARSE_THESIS_PROMPT, NDG_BUILD_DAG_PROMPT, NDG_CLASSIFY_ASSUMPTIONS_PROMPT,
+    NDG_MAP_EVIDENCE_PROMPT, NDG_DISTRIBUTE_CONFIDENCE_PROMPT
 )
-from model.prompts.output_schemas import (
-    NDG_PARSE_THESIS_SCHEMA,
-    NDG_BUILD_DAG_SCHEMA,
-    NDG_CLASSIFY_ASSUMPTIONS_SCHEMA,
-    NDG_MAP_EVIDENCE_SCHEMA,
-    NDG_DISTRIBUTE_CONFIDENCE_SCHEMA
+from model.prompts.thesis_validation_schemas import (
+    NDG_PARSE_THESIS_SCHEMA, NDG_BUILD_DAG_SCHEMA, NDG_CLASSIFY_ASSUMPTIONS_SCHEMA,
+    NDG_MAP_EVIDENCE_SCHEMA, NDG_DISTRIBUTE_CONFIDENCE_SCHEMA
 )
 
 logger = logging.getLogger(__name__)
@@ -80,7 +75,6 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
     
     # Fragility scoring configuration
     DEPTH_PENALTY_THRESHOLD: int = 5
-    DEPTH_PENALTY_PER_LAYER: float = 0.1
 
     # Maximum contribution of each component to fragility score (sum to 1.0)
     MAX_FRAGILITY_ASSUMPTION_LOAD: float = 0.3
@@ -96,45 +90,57 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
 
     # Weight maps to adjust fragility by controllability/nature/time (conservative defaults)
     CONTROL_WEIGHTS: Dict[str, float] = {
-        "Company": 0.6,
-        "Industry": 0.9,
-        "Macro": 1.0,
-        "Exogenous": 1.2
+        CONTROL_COMPANY: 0.6,
+        CONTROL_INDUSTRY: 0.9,
+        CONTROL_MACRO: 1.0,
+        CONTROL_EXOGENOUS: 1.2
     }
     NATURE_WEIGHTS: Dict[str, float] = {
-        "Structural": 0.8,
-        "Cyclical": 1.0,
-        "Execution": 1.05
+        NATURE_STRUCTURAL: 0.8,
+        NATURE_CYCLICAL: 1.0,
+        NATURE_EXECUTION: 1.05
     }
     TIME_WEIGHTS: Dict[str, float] = {
-        "Short": 0.9,
-        "Medium": 1.0,
-        "Long": 1.05
+        TIME_SENSITIVITY_SHORT: 0.9,
+        TIME_SENSITIVITY_MEDIUM: 1.0,
+        TIME_SENSITIVITY_LONG: 1.05
     }
 
+    # ============================================================================
+    # POLICY PARAMETERS: Attention Routing (Cannot Be Derived)
+    # ============================================================================
+    # These thresholds define ATTENTION ROUTING, not truth thresholds.
+    # - Confidence = LLM-calibrated belief (no ground truth exists)
+    # - Importance = semantic relevance (subjective to strategy)
+    # 
+    # These are POLICY DECISIONS for control systems, not empirical claims.
+    # Analogous to: "Alert if CPU > 80%" - a monitoring policy, not physics.
+    # ============================================================================
+    
     # Importance thresholds for critical evidence detection
-    CRITICAL_IMPORTANCE_THRESHOLD: float = 0.5  # normalized importance (0-1)
-    CRITICAL_EVIDENCE_THRESHOLD: float = 0.5  # evidence strength below which node is critical
-
-    # Confidence-importance mismatch thresholds and penalty
-    CONFIDENCE_HIGH: float = 0.7
-    CONFIDENCE_LOW: float = 0.3
-    IMPORTANCE_LOW: float = 0.2
-    IMPORTANCE_HIGH: float = 0.5
-    CONFIDENCE_LOW_PENALTY_PER_NODE: float = 0.02
+    CRITICAL_IMPORTANCE_THRESHOLD: float = 0.5  # Attention policy: flag nodes with importance > 50%
+    CRITICAL_EVIDENCE_THRESHOLD: float = 0.5    # Attention policy: flag weak evidence < 50%
+    
+    # Confidence-importance mismatch detection (attention routing)
+    CONFIDENCE_HIGH: float = 0.7   # Policy: "high confidence" attention threshold
+    CONFIDENCE_LOW: float = 0.3    # Policy: "low confidence" attention threshold
+    IMPORTANCE_LOW: float = 0.2    # Policy: "low importance" routing cutoff
+    IMPORTANCE_HIGH: float = 0.5   # Policy: "high importance" routing cutoff
+    CONFIDENCE_LOW_PENALTY_PER_NODE: float = 0.02  # Fragility penalty weight (policy choice)
 
     # Joint SPOF configuration
-    JOINT_SPOF_K: int = 6  # top-K candidates per outcome to check pairwise
-    JOINT_SPOF_EVIDENCE_THRESHOLD: float = 0.6
-    JOINT_SPOF_PENALTY_MAX: float = 0.15
+    JOINT_SPOF_K: int = 5  # top-K candidates per outcome to check pairwise (reduced to limit combinatorics)
+    JOINT_SPOF_EVIDENCE_THRESHOLD: float = 0.65  # slightly stricter to focus on weak pairs
+    JOINT_SPOF_PENALTY_MAX: float = 0.12  # bounded penalty for joint SPOFs
+    ENABLE_JOINT_SPOF_CHECKS: bool = True  # opt-in gate for pairwise joint SPOF checks
 
     # Assumption redundancy handling
-    REDUNDANCY_BONUS_CAP: float = 0.5  # max reduction in load due to redundancy
+    REDUNDANCY_BONUS_CAP: float = 0.4  # slightly conservative cap on redundancy bonus
 
     # Depth path enumeration limits
-    PATH_ENUMERATION_MAX: int = 500  # cap on enumerated paths per outcome to bound runtime
+    PATH_ENUMERATION_MAX: int = 300  # cap on enumerated paths per outcome to bound runtime
     PATH_MAX_LENGTH: int = 20  # max path length to consider
-    DEPTH_PENALTY_PER_LAYER: float = 0.1
+    DEPTH_PENALTY_PER_LAYER: float = 0.08  # slightly reduced per-layer penalty
     
     # Assumption load scaling factor (per outcome)
     ASSUMPTION_LOAD_SCALE_FACTOR: float = 0.05
@@ -156,13 +162,88 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         """
         if not stock_ticker:
             raise ValueError("stock_ticker is required ")
-
         self.stock_ticker = stock_ticker
 
-        logger.info(f"Initialized NarrativeDecompositionGraph for {stock_ticker}")
+    def _warn_ambiguous_claims(self, claims: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Detect and log ambiguous claims returned by the parser."""
+        ambiguous = [c for c in claims if c.get('claim', '').startswith('AMBIGUOUS:')]
+        if ambiguous:
+            logger.warning(f"{len(ambiguous)} ambiguous claims flagged for review")
+        return ambiguous
 
+    def _compute_avg_evidence(self, nodes: List[NDGNode]) -> float:
+        """Return average evidence_strength across provided nodes (0-1)."""
+        if not nodes:
+            return 0.0
+        return sum(getattr(n, 'evidence_strength', 0.0) for n in nodes) / len(nodes)
 
-    # --- 2.1 Thesis parsing & claim identification ---
+    def _compute_total_confidence(self, nodes: List[NDGNode]) -> float:
+        """Sum node confidences."""
+        return sum(getattr(n, 'confidence', 0.0) for n in nodes)
+
+    def _ensure_confidence_consistency(self, nodes: List[NDGNode]) -> Tuple[float, bool]:
+        """Ensure confidence sum is within tolerance; optionally normalize and update metadata.
+
+        Returns (total_confidence, is_consistent).
+        """
+        total_conf = self._compute_total_confidence(nodes)
+        # Prefer last seen metadata when available
+        previous_sum = getattr(self, '_last_confidence_sum', total_conf)
+        is_consistent = getattr(self, '_last_confidence_consistent', abs(previous_sum - 1.0) <= self.CONFIDENCE_SUM_TOLERANCE)
+
+        # If current total differs from previous metadata, use the computed total as truth
+        if abs(total_conf - previous_sum) > 1e-9:
+            previous_sum = total_conf
+            is_consistent = abs(previous_sum - 1.0) <= self.CONFIDENCE_SUM_TOLERANCE
+
+        # Optionally normalize if inconsistent and configured
+        if not is_consistent and self.NORMALIZE_CONFIDENCES_ON_RED_TEAM:
+            logger.info("NDG configured to normalize confidences on run; normalizing now using method: %s", self.NORMALIZE_METHOD)
+            norm_info = self.normalize_confidences(nodes, method=self.NORMALIZE_METHOD)
+            total_conf = norm_info.get('new_sum', self._compute_total_confidence(nodes))
+            is_consistent = abs(total_conf - 1.0) <= self.CONFIDENCE_SUM_TOLERANCE
+            self._last_confidence_sum = total_conf
+            self._last_confidence_consistent = is_consistent
+            logger.info("NDG normalization complete (new sum: %.3f)", total_conf)
+        else:
+            # update metadata if not present
+            self._last_confidence_sum = previous_sum
+            self._last_confidence_consistent = is_consistent
+
+        return total_conf, is_consistent
+
+    def _format_summary(self, fragility: FragilityMetrics, nodes: List[NDGNode], avg_evidence: float) -> str:
+        """Create a compact summary string for NDGOutput."""
+        return f"Fragility: {fragility.fragility_score:.2f}; nodes: {len(nodes)}; avg_evidence: {avg_evidence:.2f}"
+
+    def _prepare_inputs(self, thesis_narrative: Optional[str], company_context: Optional[str], thesis_input: Optional[Any]) -> Tuple[str, str]:
+        """Return validated inputs, preferring `thesis_input` when provided."""
+        if thesis_input is not None:
+            thesis_narrative = thesis_input.narrative
+
+        if not thesis_narrative:
+            raise ValueError("thesis_narrative is required for NDG analysis")
+        if not company_context:
+            raise ValueError("company_context is required for NDG analysis")
+        return thesis_narrative, company_context
+
+    def _build_graph_and_classify(self, claims: List[Dict[str, Any]]) -> Tuple[List[NDGNode], List[NDGEdge]]:
+        """Build DAG and classify assumptions in one helper."""
+        ambiguous = self._warn_ambiguous_claims(claims)
+        nodes, edges = self.build_dag(claims)
+        logger.info(f"Built graph: {len(nodes)} nodes, {len(edges)} edges")
+        nodes = self.classify_assumptions(nodes)
+        logger.info("Classified assumptions")
+        return nodes, edges
+
+    def _enrich_nodes(self, nodes: List[NDGNode], company_context: str, quantitative_context: Optional[ThesisQuantitativeContext], thesis_narrative: str) -> List[NDGNode]:
+        """Map evidence and distribute confidence for node enrichment."""
+        nodes = self.map_evidence(nodes, company_context, quantitative_context)
+        avg_evidence = self._compute_avg_evidence(nodes)
+        logger.debug(f"Evidence mapped (avg strength: {avg_evidence:.2f})")
+        nodes = self.distribute_confidence(thesis_narrative, nodes)
+        return nodes
+    
     def parse_thesis(self, thesis_narrative: str) -> Dict[str, Any]:
         """Parse an analyst thesis into structured claims and optional metrics.
 
@@ -201,9 +282,7 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
             "claims": claims,
             "metrics": metrics
         }
-
     
-    # --- 2.2 Causal graph construction ---
     def build_dag(self, claims: List[Dict]) -> Tuple[List[NDGNode], List[NDGEdge]]:
         """Construct a DAG from parsed claims.
 
@@ -326,7 +405,6 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         
         return graph_data
     
-    # --- 2.3 Assumption localization & ownership ---
     def classify_assumptions(self, nodes: List[NDGNode]) -> List[NDGNode]:
         """Classify each node by ``control``, ``nature``, and ``time_sensitivity``.
 
@@ -365,7 +443,6 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         logger.info("Classified assumptions")
         return nodes
     
-    # --- 2.4 EVIDENCE MAPPING ---
     def map_evidence(
         self, 
         nodes: List[NDGNode], 
@@ -419,7 +496,6 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         logger.info(f"Mapped evidence (avg strength: {avg:.2f}, weak_nodes={len(weak_nodes)})")
         return nodes
     
-    # --- 2.5 CONFIDENCE ATTRIBUTION ---
     def distribute_confidence(
         self, 
         thesis_narrative: str, 
@@ -521,88 +597,6 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         # Unknown method: no-op
         return {'method': method, 'original_sum': original_sum, 'new_sum': original_sum, 'adjustments': adjustments}
 
-    # --- Helper utilities for `run()` simplification ---
-    def _warn_ambiguous_claims(self, claims: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Detect and log ambiguous claims returned by the parser."""
-        ambiguous = [c for c in claims if c.get('claim', '').startswith('AMBIGUOUS:')]
-        if ambiguous:
-            logger.warning(f"{len(ambiguous)} ambiguous claims flagged for review")
-        return ambiguous
-
-    def _compute_avg_evidence(self, nodes: List[NDGNode]) -> float:
-        """Return average evidence_strength across provided nodes (0-1)."""
-        if not nodes:
-            return 0.0
-        return sum(getattr(n, 'evidence_strength', 0.0) for n in nodes) / len(nodes)
-
-    def _compute_total_confidence(self, nodes: List[NDGNode]) -> float:
-        """Sum node confidences."""
-        return sum(getattr(n, 'confidence', 0.0) for n in nodes)
-
-    def _ensure_confidence_consistency(self, nodes: List[NDGNode]) -> Tuple[float, bool]:
-        """Ensure confidence sum is within tolerance; optionally normalize and update metadata.
-
-        Returns (total_confidence, is_consistent).
-        """
-        total_conf = self._compute_total_confidence(nodes)
-        # Prefer last seen metadata when available
-        previous_sum = getattr(self, '_last_confidence_sum', total_conf)
-        is_consistent = getattr(self, '_last_confidence_consistent', abs(previous_sum - 1.0) <= self.CONFIDENCE_SUM_TOLERANCE)
-
-        # If current total differs from previous metadata, use the computed total as truth
-        if abs(total_conf - previous_sum) > 1e-9:
-            previous_sum = total_conf
-            is_consistent = abs(previous_sum - 1.0) <= self.CONFIDENCE_SUM_TOLERANCE
-
-        # Optionally normalize if inconsistent and configured
-        if not is_consistent and self.NORMALIZE_CONFIDENCES_ON_RED_TEAM:
-            logger.info("NDG configured to normalize confidences on run; normalizing now using method: %s", self.NORMALIZE_METHOD)
-            norm_info = self.normalize_confidences(nodes, method=self.NORMALIZE_METHOD)
-            total_conf = norm_info.get('new_sum', self._compute_total_confidence(nodes))
-            is_consistent = abs(total_conf - 1.0) <= self.CONFIDENCE_SUM_TOLERANCE
-            self._last_confidence_sum = total_conf
-            self._last_confidence_consistent = is_consistent
-            logger.info("NDG normalization complete (new sum: %.3f)", total_conf)
-        else:
-            # update metadata if not present
-            self._last_confidence_sum = previous_sum
-            self._last_confidence_consistent = is_consistent
-
-        return total_conf, is_consistent
-
-    def _format_summary(self, fragility: FragilityMetrics, nodes: List[NDGNode], avg_evidence: float) -> str:
-        """Create a compact summary string for NDGOutput."""
-        return f"Fragility: {fragility.fragility_score:.2f}; nodes: {len(nodes)}; avg_evidence: {avg_evidence:.2f}"
-
-    def _prepare_inputs(self, thesis_narrative: Optional[str], company_context: Optional[str], thesis_input: Optional[ThesisInput]) -> Tuple[str, str]:
-        """Return validated inputs, preferring `thesis_input` when provided."""
-        if thesis_input is not None:
-            thesis_narrative = thesis_input.narrative
-
-        if not thesis_narrative:
-            raise ValueError("thesis_narrative is required for NDG analysis")
-        if not company_context:
-            raise ValueError("company_context is required for NDG analysis")
-        return thesis_narrative, company_context
-
-    def _build_graph_and_classify(self, claims: List[Dict[str, Any]]) -> Tuple[List[NDGNode], List[NDGEdge]]:
-        """Build DAG and classify assumptions in one helper."""
-        ambiguous = self._warn_ambiguous_claims(claims)
-        nodes, edges = self.build_dag(claims)
-        logger.info(f"Built graph: {len(nodes)} nodes, {len(edges)} edges")
-        nodes = self.classify_assumptions(nodes)
-        logger.info("Classified assumptions")
-        return nodes, edges
-
-    def _enrich_nodes(self, nodes: List[NDGNode], company_context: str, quantitative_context: Optional[ThesisQuantitativeContext], thesis_narrative: str) -> List[NDGNode]:
-        """Map evidence and distribute confidence for node enrichment."""
-        nodes = self.map_evidence(nodes, company_context, quantitative_context)
-        avg_evidence = self._compute_avg_evidence(nodes)
-        logger.debug(f"Evidence mapped (avg strength: {avg_evidence:.2f})")
-        nodes = self.distribute_confidence(thesis_narrative, nodes)
-        return nodes
-
-    # --- 2.6 FRAGILITY & CONCENTRATION DIAGNOSTICS ---
     def compute_fragility(
         self, 
         nodes: List[NDGNode], 
@@ -637,7 +631,6 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         
         # Categorize nodes by type
         assumptions = [n for n in nodes if n.node_type == self.NODE_TYPE_ASSUMPTION]
-        drivers = [n for n in nodes if n.node_type == self.NODE_TYPE_DRIVER]
         outcomes = [n for n in nodes if n.node_type == self.NODE_TYPE_OUTCOME]
         
         # Track node counts
@@ -671,43 +664,6 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
             if assumptions_per_outcome else 0.0
         )
         
-        # 3. Single-point failures (nodes with low evidence but high path concentration)
-        def count_paths_through_node(node_id: str) -> int:
-            """Count how many paths from assumptions to outcomes pass through this node."""
-            upstream_memo: Dict[str, int] = {}
-            downstream_memo: Dict[str, int] = {}
-
-            def count_upstream(nid: str) -> int:
-                if nid in upstream_memo:
-                    return upstream_memo[nid]
-                node = node_map[nid]
-                if node.node_type == self.NODE_TYPE_ASSUMPTION:
-                    upstream_memo[nid] = 1
-                    return 1
-                total = 0
-                for parent in incoming[nid]:
-                    total += count_upstream(parent)
-                upstream_memo[nid] = total
-                return total
-
-            def count_downstream(nid: str) -> int:
-                if nid in downstream_memo:
-                    return downstream_memo[nid]
-                node = node_map[nid]
-                if node.node_type == self.NODE_TYPE_OUTCOME:
-                    downstream_memo[nid] = 1
-                    return 1
-                total = 0
-                for child in outgoing[nid]:
-                    total += count_downstream(child)
-                downstream_memo[nid] = total
-                return total
-
-            upstream = count_upstream(node_id)
-            downstream = count_downstream(node_id)
-            return upstream * downstream
-        
-        # --- Detect feedback loops (SCCs) ---
         # Tarjan's algorithm for SCCs
         node_ids = list(node_map.keys())
         index = 0
@@ -752,7 +708,6 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         loop_bonus_total = 0.0
         loop_penalty_total = 0.0
 
-        # Build a fast set for edges per (src,target) strength lookup
         edge_strength_map = {(e.source_id, e.target_id): e.strength for e in edges}
 
         for i, loop in enumerate(loops):
@@ -765,14 +720,12 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
                 ctrl = getattr(node_map[nid], 'control', '') or 'Unknown'
                 control_counts[ctrl] = control_counts.get(ctrl, 0) + 1
 
-            # Determine reinforcement vs weakness
             reinforcing = (
                 avg_edge_strength >= self.LOOP_EDGE_STRENGTH_THRESHOLD and
                 avg_evidence >= self.LOOP_EVIDENCE_THRESHOLD and
                 (control_counts.get('Exogenous', 0) / len(loop)) < 0.5
             )
 
-            # Compute conservative bonus/penalty
             if reinforcing:
                 factor = max(0.0, ((avg_edge_strength - self.LOOP_EDGE_STRENGTH_THRESHOLD) + (avg_evidence - self.LOOP_EVIDENCE_THRESHOLD)) / (2 * (1.0 - self.LOOP_EDGE_STRENGTH_THRESHOLD)))
                 bonus = self.LOOP_REINFORCEMENT_BONUS_MAX * min(1.0, factor)
@@ -811,7 +764,6 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
                 scc_outgoing[s].add(t)
                 scc_incoming[t].add(s)
 
-        # Memoized upstream/downstream counts per SCC
         scc_upstream_memo: Dict[int, int] = {}
         scc_downstream_memo: Dict[int, int] = {}
 
@@ -871,10 +823,11 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
             tw = self.TIME_WEIGHTS.get(getattr(n, 'time_sensitivity', ''), 1.0)
             per_node_weights[n.id] = (cw * nw * tw) ** (1.0 / 3.0)
 
-        # adjacency already defined as 'outgoing'
-        def enumerate_paths(start: str, target: str, max_paths: int = 200, max_len: int =  self.PATH_MAX_LENGTH):
+        def enumerate_paths(start: str, target: str, max_paths: Optional[int] = None, max_len: Optional[int] = None):
             results: List[List[str]] = []
             stack: List[Tuple[str, List[str]]] = [(start, [start])]
+            max_paths = max_paths or self.PATH_ENUMERATION_MAX
+            max_len = max_len or self.PATH_MAX_LENGTH
             while stack and len(results) < max_paths:
                 node_id, path = stack.pop()
                 if len(path) > max_len:
@@ -889,7 +842,6 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
             return results
 
         def any_path_excluding(banned: Set[str], target: str) -> bool:
-            # BFS from all assumptions excluding banned nodes
             visited = set()
             stack = [a.id for a in assumptions if a.id not in banned]
             while stack:
@@ -910,11 +862,13 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         depth_path_penalties: List[float] = []
         max_graph_depth = 0
 
+        fragility_components: Dict[str, Any] = {}
+
         for outcome in outcomes:
             # collect path counts per assumption for this outcome
             assump_path_counts: Dict[str, int] = {}
             for a in assumptions:
-                paths = enumerate_paths(a.id, outcome.id, max_paths=200)
+                paths = enumerate_paths(a.id, outcome.id)
                 if paths:
                     assump_path_counts[a.id] = len(paths)
 
@@ -932,36 +886,35 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
             outcome_assump_weight = sum(per_node_weights.get(aid, 1.0) for aid in assump_path_counts.keys())
             effective_load_sum += outcome_assump_weight * (1.0 - redundancy_bonus)
 
-            # joint SPOF detection among top-K candidate assumptions
-            candidates = sorted(assump_path_counts.items(), key=lambda x: x[1], reverse=True)[:self.JOINT_SPOF_K]
-            cand_ids = [c[0] for c in candidates]
-            for i in range(len(cand_ids)):
-                for j in range(i+1, len(cand_ids)):
-                    a_i = cand_ids[i]
-                    a_j = cand_ids[j]
-                    if not any_path_excluding({a_i, a_j}, outcome.id):
-                        e_i = node_map[a_i].evidence_strength
-                        e_j = node_map[a_j].evidence_strength
-                        if (e_i + e_j) / 2.0 < self.JOINT_SPOF_EVIDENCE_THRESHOLD:
-                            joint_spof_pairs.append((outcome.id, a_i, a_j))
-                            fragility_components.setdefault('joint_spofs', []).append({'outcome': outcome.id, 'pair': (a_i, a_j), 'avg_evidence': (e_i+e_j)/2.0})
-                            # record joint SPOF pair as a traceable failure token
-                            single_point_failures.append(f"joint:{a_i}+{a_j}")
+            # Joint SPOF detection among top-K candidates (opt-in for performance)
+            if self.ENABLE_JOINT_SPOF_CHECKS:
+                candidates = sorted(assump_path_counts.items(), key=lambda x: x[1], reverse=True)[:self.JOINT_SPOF_K]
+                cand_ids = [c[0] for c in candidates]
+                for i in range(len(cand_ids)):
+                    for j in range(i+1, len(cand_ids)):
+                        a_i = cand_ids[i]
+                        a_j = cand_ids[j]
+                        if not any_path_excluding({a_i, a_j}, outcome.id):
+                            e_i = node_map[a_i].evidence_strength
+                            e_j = node_map[a_j].evidence_strength
+                            if (e_i + e_j) / 2.0 < self.JOINT_SPOF_EVIDENCE_THRESHOLD:
+                                joint_spof_pairs.append((outcome.id, a_i, a_j))
+                                fragility_components.setdefault('joint_spofs', []).append({'outcome': outcome.id, 'pair': (a_i, a_j), 'avg_evidence': (e_i+e_j)/2.0})
+                                single_point_failures.append(f"joint:{a_i}+{a_j}")
+            else:
+                fragility_components['joint_spofs'] = []  # disabled by configuration
 
             # enumerate long paths and compute path-level depth penalties
             # collect penalties for this outcome
             path_penalties_local: List[float] = []
             for a_id in assump_path_counts.keys():
-                paths = enumerate_paths(a_id, outcome.id, max_paths=200)
+                paths = enumerate_paths(a_id, outcome.id)
                 for p in paths:
                     length = len(p)
                     if length <= self.DEPTH_PENALTY_THRESHOLD:
                         continue
                     max_graph_depth = max(max_graph_depth, length)
-                    # path evidence = geometric mean of node evidence strengths
-                    evs = [node_map[nid].evidence_strength for nid in p]
-                    # avoid zeros by clipping small epsilon
-                    evs = [max(1e-6, e) for e in evs]
+                    evs = [max(1e-6, node_map[nid].evidence_strength) for nid in p]
                     path_ev = math.exp(sum(math.log(e) for e in evs) / len(evs))
                     control_exposure = sum(1 for nid in p if getattr(node_map[nid], 'control', '') in ('Macro', 'Exogenous')) / len(p)
                     path_pen = (length - self.DEPTH_PENALTY_THRESHOLD) * self.DEPTH_PENALTY_PER_LAYER * (1.0 - path_ev) * (1.0 + control_exposure)
@@ -976,7 +929,6 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         else:
             load_component = 0.0
         fragility_score = 0.0
-        fragility_components = {}
         fragility_score += load_component
         fragility_components['assumption_load'] = load_component
         fragility_components['assumption_load_effective'] = avg_effective_load if outcomes else 0.0
@@ -1059,7 +1011,6 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         fragility_components['critical_low_nodes'] = critical_low_nodes
         fragility_components['excluded_from_evidence_component'] = list(excluded_nodes)
 
-        # --- Structural confidence propagation ---
         confidence_mismatch: List[str] = []
         max_imp = max(importance_norm.values()) if importance_norm else 0.0
         total_norm_conf = 0.0
@@ -1122,13 +1073,12 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
             critical_low_evidence_nodes=critical_low_nodes
         )
     
-    # --- 2.7 MAIN PIPELINE ---
     def run(
         self, 
         thesis_narrative: Optional[str] = None, 
         company_context: Optional[str] = None, 
         quantitative_context: Optional[ThesisQuantitativeContext] = None,
-        thesis_input: Optional[ThesisInput] = None
+        thesis_input: Optional[Any] = None
     ) -> NDGOutput:
         """
         Execute the full NDG pipeline and return structured diagnostics.
@@ -1170,7 +1120,7 @@ class NarrativeDecompositionGraph(LLMHelperMixin):
         if quantitative_context:
             logger.info(f"Quantitative context loaded (data as of: {quantitative_context.data_as_of})")
         
-        # Step 1: Parse thesis (claims + optional metrics)
+        # Parse thesis (claims + optional metrics)
         parsed = self.parse_thesis(thesis_narrative)
         claims = parsed.get('claims', [])
         parsed_metrics = parsed.get('metrics', {}) or {}

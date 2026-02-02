@@ -1,0 +1,25 @@
+SNOW US Equity:
+  name: Snowflake Inc.
+  ticker_symbol: SNOW
+  exchange: NYSE
+  currency: USD
+PM US Equity:
+  name: Philip Morris International Inc.
+  ticker_symbol: PM
+  exchange: NYSE
+  currency: USD
+SQ US Equity: 
+  name: Block, Inc.
+  ticker_symbol: XYZ
+  exchange: NYSE
+  currency: USD
+KER FP Equity:
+  name: Kering SA
+  ticker_symbol: KER.PA
+  exchange: Euronext Paris
+  currency: EUR
+GOOGL US Equity:
+  name: Alphabet Inc.
+  ticker_symbol: GOOGL
+  exchange: NASDAQ
+  currency: USD

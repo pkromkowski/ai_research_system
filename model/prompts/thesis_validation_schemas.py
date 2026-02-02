@@ -1,4 +1,4 @@
-"""JSON output schemas for Anthropic tool use."""
+"""Thesis Validation Structured Output Schemas."""
 
 # --- NARRATIVE DECOMPOSITION GRAPH (NDG) SCHEMAS ---
 NDG_PARSE_THESIS_SCHEMA = {
@@ -255,7 +255,6 @@ NDG_DISTRIBUTE_CONFIDENCE_SCHEMA = {
     }
 }
 
-
 # --- AI RED TEAM (RTA) SCHEMAS ---
 RTA_RETRIEVE_ANALOGS_SCHEMA = {
     "name": "retrieve_analogs_output",
@@ -338,9 +337,13 @@ RTA_MAP_FAILURE_MODE_SCHEMA = {
                 "minItems": 0,
                 "maxItems": 8,
                 "description": "Observable indicators that appeared BEFORE failure was obvious"
+            },
+            "is_downside_transferable": {
+                "type": "boolean",
+                "description": "True if downside risk failure (margin compression, demand shock, competitive pressure); False if upside scenario failure (turnaround, innovation, transformation)"
             }
         },
-        "required": ["category", "description", "early_warnings", "taxonomy_match", "category_confidence"]
+        "required": ["category", "description", "early_warnings", "taxonomy_match", "category_confidence", "is_downside_transferable"]
     }
 }
 
@@ -397,7 +400,6 @@ RTA_SYNTHESIZE_CHALLENGE_SCHEMA = {
         "required": ["challenge_text"]
     }
 }
-
 
 # --- COUNTERFACTUAL RESEARCH ENGINE (CRE) SCHEMAS ---
 CRE_BOUND_ASSUMPTIONS_SCHEMA = {
@@ -519,9 +521,8 @@ CRE_GENERATE_SCENARIOS_SCHEMA = {
     }
 }
 
-
 # --- Financial Translation Agent (FTA) SCHEMAS ---
-CRE_GENERATE_REASONING_SCHEMA = {
+FT_GENERATE_REASONING_SCHEMA = {
     "name": "generate_reasoning_output",
     "description": "Explain why a stress scenario produces a specific outcome",
     "input_schema": {
@@ -554,7 +555,7 @@ CRE_GENERATE_REASONING_SCHEMA = {
     }
 } 
 
-CRE_SUMMARY_SCHEMA = {
+FT_SUMMARY_SCHEMA = {
     "name": "cre_summary_output",
     "description": "Structured executive summary of CRE results",
     "input_schema": {
@@ -622,25 +623,33 @@ CRE_SUMMARY_SCHEMA = {
     }
 } 
 
-METRIC_TO_FACTOR_CLASSIFICATION_SCHEMA = {
-    "name": "metric_to_factor_classification",
-    "description": "Classify a metric into canonical value factors with coefficients and confidence",
+METRICS_BATCH_CLASSIFICATION_SCHEMA = {
+    "name": "metrics_batch_classification",
+    "description": "Classify multiple metrics into canonical value factors in a single call",
     "input_schema": {
         "type": "object",
         "properties": {
-            "metric": {"type": "string"},
-            "factor_influences": {
-                "type": "object",
-                "description": "factor -> coefficient (-1.0..1.0)",
-                "additionalProperties": {"type": "number"}
-            },
-            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-            "explanation": {"type": "string"}
+            "classifications": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "metric": {"type": "string"},
+                        "factor_influences": {
+                            "type": "object",
+                            "description": "factor -> coefficient (-1.0..1.0)",
+                            "additionalProperties": {"type": "number"}
+                        },
+                        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                        "explanation": {"type": "string"}
+                    },
+                    "required": ["metric", "factor_influences", "confidence"]
+                }
+            }
         },
-        "required": ["metric", "factor_influences", "confidence"]
+        "required": ["classifications"]
     }
 }
-
 
 # --- IDEA HALF-LIFE ESTIMATOR (IHLE) SCHEMAS ---
 IHLE_ADJUST_REGIME_SCHEMA = {

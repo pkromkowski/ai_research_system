@@ -2,11 +2,34 @@ from datetime import datetime
 from dataclasses import dataclass,field
 from typing import Optional, List, Dict, Any
 
-# Centralized node-type constants for reuse across agents
-NODE_TYPE_ASSUMPTION = "ASSUMPTION"
-NODE_TYPE_DRIVER = "DRIVER"
-NODE_TYPE_OUTCOME = "OUTCOME"
+CT_NODE_ASSUMPTION = "ASSUMPTION"
+CT_NODE_DRIVER = "DRIVER"
+CT_NODE_OUTCOME = "OUTCOME"
 
+OUTCOME_TIER_SURVIVES = "SURVIVES"
+OUTCOME_TIER_IMPAIRED = "IMPAIRED"
+OUTCOME_TIER_BROKEN = "BROKEN"
+
+SEVERITY_HIGH = "HIGH"
+SEVERITY_MEDIUM = "MEDIUM"
+SEVERITY_LOW = "LOW"
+
+THESIS_STATUS_VALID = "VALID"
+THESIS_STATUS_FRAGILE = "FRAGILE"
+THESIS_STATUS_BROKEN = "BROKEN"
+
+CONTROL_COMPANY = "COMPANY"
+CONTROL_INDUSTRY = "INDUSTRY"
+CONTROL_MACRO = "MACRO"
+CONTROL_EXOGENOUS = "EXOGENOUS"
+
+NATURE_STRUCTURAL = "STRUCTURAL"
+NATURE_CYCLICAL = "CYCLICAL"
+NATURE_EXECUTION = "EXECUTION"
+
+TIME_SENSITIVITY_SHORT = "SHORT"
+TIME_SENSITIVITY_MEDIUM = "MEDIUM"
+TIME_SENSITIVITY_LONG = "LONG"
 
 # --- Perplexity Research
 @dataclass
@@ -29,7 +52,6 @@ class ResearchResult:
             "timestamp": self.timestamp,
         }
     
-
 # -- Stock Analytics Metrics -- 
 @dataclass
 class ThesisQuantitativeContext:
@@ -45,7 +67,7 @@ class ThesisQuantitativeContext:
     not static point-in-time values.
     """
     stock_ticker: str
-    data_as_of: str  # When data was fetched
+    data_as_of: str 
     
     # --- Growth trajectory ---
     # These show how the business is evolving, not just where it is
@@ -210,7 +232,6 @@ class ThesisQuantitativeContext:
             if v is not None and not k.startswith('_')
         }
     
-
 # --- NDG ---
 @dataclass
 class NDGNode:
@@ -235,9 +256,6 @@ class NDGNode:
     confidence: float = 0.0  # 0-1: analyst confidence in this specific claim
     confidence_basis: str = ""  # Why this confidence level (certainty markers)
     effective_confidence: float = 0.0  # Structural-weighted confidence (computed by NDG)
-    
-    # Note: default_factory ensures list fields are non-null and avoids the need
-    # for ad-hoc __post_init__ initializers used previously. (Cleaner & safer.)
 
 @dataclass
 class NDGEdge:
@@ -256,7 +274,6 @@ class FeedbackLoop:
     avg_evidence: float
     control_mix: Dict[str, int]
     reinforcing: bool = False
-
 
 @dataclass
 class FragilityMetrics:
@@ -298,7 +315,6 @@ class NDGOutput:
         if not self.created_at:
             self.created_at = datetime.now().isoformat()
 
-
 # --- Red Team Agent ---
 @dataclass
 class HistoricalAnalog:
@@ -319,6 +335,8 @@ class FailureMode:
     - taxonomy_match: True if category is from the provided taxonomy, False if an alternative label
     - category_confidence: Model confidence (0.0-1.0) that the selected category is appropriate
     - alternative_category: Optional label when taxonomy_match is False
+    - is_downside_transferable: True if downside risk failure (margin compression, demand shock),
+      False if upside scenario failure (turnaround, innovation, strategic transformation)
     """
     category: str  # Primary label (may be taxonomy or alternative)
     description: str  # How the failure manifested
@@ -326,6 +344,7 @@ class FailureMode:
     taxonomy_match: bool = True
     category_confidence: float = 1.0
     alternative_category: Optional[str] = None
+    is_downside_transferable: bool = True  # True for downside risks, False for upside scenarios
     
     def __post_init__(self):
         if self.early_warnings is None:
@@ -344,7 +363,11 @@ class RelevanceScoring:
 
 @dataclass
 class RedTeamChallenge:
-    """Single adversarial challenge to an assumption (3.5)"""
+    """Single adversarial challenge to an assumption (3.5)
+    
+    Note: severity is EPISTEMIC (relevance + evidence weakness), not economic.
+    Use suspected_value_exposure for diagnostic economic impact hint.
+    """
     node_id: str  # ID of assumption being challenged
     assumption_text: str  # The claim being challenged
     historical_precedent: HistoricalAnalog  # Similar case that failed
@@ -352,7 +375,8 @@ class RedTeamChallenge:
     relevance: RelevanceScoring  # Why this matters now
     early_warning_indicators: List[str]  # What to watch for
     challenge_text: str  # Concise, neutral critique
-    severity: str = "medium"  # "high" | "medium" | "low"
+    severity: str = "medium"  # "high" | "medium" | "low" (epistemic severity only)
+    suspected_value_exposure: str = "UNKNOWN"  # "LOW" | "MEDIUM" | "HIGH" | "UNKNOWN" (diagnostic only, not used in scoring)
     score_breakdown: Optional[Dict[str, float]] = None  # Component contributions to challenge priority score
     inputs_used: Optional[Dict[str, Any]] = None  # Raw inputs used to compute scores
 
@@ -385,7 +409,6 @@ class RedTeamOutput:
             self.node_score_breakdowns = {}
         if not self.created_at:
             self.created_at = datetime.now().isoformat()
-
 
 # --- CRE ---
 @dataclass
@@ -427,7 +450,6 @@ class CREGenerationResult:
         if not self.created_at:
             self.created_at = datetime.now().isoformat()
 
-
 # --- FT ---
 @dataclass
 class ValuationResult:
@@ -443,7 +465,7 @@ class ValuationResult:
     metric_to_factor_mapping: Optional[Dict[str, Dict[str, float]]] = None  # metric -> {factor: coeff}
 
 @dataclass
-class CREOutput:
+class FTOutput:
     """Counterfactual Research Engine output
 
     Notes:
@@ -473,6 +495,8 @@ class CREOutput:
     summary_text: Optional[str] = None  # Generated summary of key contradictions
     summary_structured: Optional[Dict[str, Any]] = None  # Structured summary JSON (CRE_SUMMARY_SCHEMA)
     # Provenance & factorization diagnostics
+    generated_raw: Optional[List[Dict[str, Any]]] = None  # Raw scenario generation data
+    generated_count: Optional[int] = None  # Total number of scenarios generated
     defaults_applied: Optional[List[str]] = None
     inferred_metrics: Optional[List[str]] = None
     factor_scores: Optional[Dict[str, float]] = None  # aggregated factor contributions across scenarios
@@ -482,19 +506,18 @@ class CREOutput:
 class FTResult:
     """Result returned by FinancialTranslation.run
 
-    Contains the evaluated CREOutput and the structured summary produced by the
+    Contains the evaluated FTOutput and the structured summary produced by the
     translation step. FT intentionally does not mutate the original CREGenerationResult
-    but returns a separate structured summary payload along with the final CREOutput.
+    but returns a separate structured summary payload along with the final FTOutput.
     """
     scenario_set: CREScenarioSet
-    cre_output: CREOutput
+    ft_output: FTOutput
     structured_summary: Optional[Dict[str, Any]] = None
     created_at: Optional[str] = None
 
     def __post_init__(self):
         if not self.created_at:
             self.created_at = datetime.now().isoformat()
-
 
 # --- Thesis Validity Evaluation ---
 @dataclass
@@ -528,20 +551,7 @@ class ThesisValidityOutput:
         if not self.created_at:
             self.created_at = datetime.now().isoformat()
 
-
 # --- Idea Half-Life Estimator ---
-@dataclass
-class ContradictionTracking:
-    """Accumulation and persistence tracking (4.4)"""
-    node_id: str
-    contradiction_count: int = 0  # How many contradicting evidence items
-    support_count: int = 0  # How many supporting evidence items
-    first_contradiction_date: str = None
-    last_contradiction_date: str = None
-    persistence_score: float = 0.0  # 0-1: How persistent is the contradiction
-    unresolved: bool = True  # Has management/data addressed the issue?
-    contradiction_severity: str = "low"  # "low" | "medium" | "high"
-
 @dataclass
 class AssumptionDecayRate:
     """Decay rate for individual assumption"""
@@ -589,9 +599,6 @@ class MonitoringCadence:
 class HalfLifeEstimate:
     """Final half-life calculation"""
     estimated_half_life_months: float
-    confidence_band_low: float  # Lower bound in months
-    confidence_band_high: float  # Upper bound in months
-    confidence_width: float  # Band width as % of estimate
     primary_decay_drivers: List[str]  # Top 3 assumptions driving decay
     decay_trend: str  # "Stable" | "Gradual" | "Accelerating"
     time_to_first_broken: float  # Months until first assumption breaks (projected)
@@ -635,6 +642,30 @@ class IHLEOutput:
     # Sensitivity analysis summary (optional)
     sensitivity_analysis: Optional[dict] = None
 
+# --- Aggregation Diagnostics Output ---
+@dataclass
+class AggregationDiagnosticsOutput:
+    """Aggregated diagnostics from thesis validation pipeline."""
+    stock_ticker: str
+    total_scenarios: int
+    broken_count: int
+    impaired_count: int
+    survives_count: int
+    scenario_survival_fraction: Optional[float]
+    weighted_survival_rate: Optional[float]
+    tail_loss_percentile: Optional[float]
+    raw_fragility_proxy: Optional[float]
+    impaired_scenarios: List[str]
+    broken_scenarios: List[str]
+    ihle_half_life_months: Optional[float]
+    primary_decay_drivers: List[str]
+    recommended_cadence: Optional[Any]
+    top_red_challenges: List[str]
+    summary_text: str
+    failure_articulation: Optional[str]
+    scenario_ranking: Optional[List[str]]
+    comparable_scores: Optional[Dict[str, float]]
+    research_packet: Optional[Dict[str, Any]]
 
 # --- Final Thesis Report ---
 @dataclass
@@ -646,7 +677,6 @@ class FinalThesisReport:
     survival_rate: float
     fragility_score: float
     dominant_failure_modes: List[str]
-    calibrated_confidence: float
     suggested_position_size_factor: float
     half_life_months: float
     key_risks: List[str]
