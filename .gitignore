@@ -33,7 +33,6 @@ wheels/
 
 # Project-specific folders with downloaded/generated content
 model/documents/*
-scripts/output/
 web_app/
 
 # Case study and personal documents
