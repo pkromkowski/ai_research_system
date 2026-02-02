@@ -37,4 +37,5 @@ web_app/
 
 # Case study and personal documents
 *.pdf
-ai-quant-researcher-case-study-q1-2026.pdf
+!presentations/
+!presentations/**
