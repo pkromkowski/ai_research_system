@@ -12,7 +12,6 @@ try:
 except Exception:
     _Perplexity = None
 
-from model.prompts import format_prompt
 from model.core.config import PerplexityConfig
 from model.core.types import ResearchResult
 from model.prompts.perplexity_research_prompts import (
@@ -75,6 +74,18 @@ class PerplexityResearchProvider:
 
         self._client: Any = client
         self._client_type: Optional[str] = "injected" if client is not None else None
+    
+    @staticmethod
+    def format_prompt(template: str, **kwargs) -> str:
+        """Simple prompt formatter used for demos and tests.
+
+        For production, use richer templating and safety checks.
+        """
+        try:
+            return template.format(**kwargs)
+        except Exception:
+            # Fallback to a simple representation
+            return str(template)
     
     @property
     def client(self) -> Any:
@@ -210,7 +221,7 @@ class PerplexityResearchProvider:
             ResearchResult with news summary and citations
         """
         days = days or self.DEFAULT_NEWS_DAYS
-        prompt = format_prompt(
+        prompt = self.format_prompt(
             RECENT_NEWS_PROMPT,
             ticker_or_company=self.ticker,
             days=days,
@@ -223,7 +234,7 @@ class PerplexityResearchProvider:
         Returns:
             ResearchResult with earnings analysis and citations
         """
-        prompt = format_prompt(
+        prompt = self.format_prompt(
             EARNINGS_ANALYSIS_PROMPT,
             ticker_or_company=self.ticker,
         )
@@ -235,7 +246,7 @@ class PerplexityResearchProvider:
         Returns:
             ResearchResult with competitive analysis and citations
         """
-        prompt = format_prompt(
+        prompt = self.format_prompt(
             COMPETITIVE_LANDSCAPE_PROMPT,
             ticker_or_company=self.ticker,
         )
@@ -247,7 +258,7 @@ class PerplexityResearchProvider:
         Returns:
             ResearchResult with risk analysis and citations
         """
-        prompt = format_prompt(
+        prompt = self.format_prompt(
             RISK_FACTORS_PROMPT,
             ticker_or_company=self.ticker,
         )
@@ -259,7 +270,7 @@ class PerplexityResearchProvider:
         Returns:
             ResearchResult with bull/bear analysis and citations
         """
-        prompt = format_prompt(
+        prompt = self.format_prompt(
             BULL_BEAR_CASES_PROMPT,
             ticker_or_company=self.ticker,
         )
@@ -271,7 +282,7 @@ class PerplexityResearchProvider:
         Returns:
             ResearchResult with management/governance info and citations
         """
-        prompt = format_prompt(
+        prompt = self.format_prompt(
             MANAGEMENT_GOVERNANCE_PROMPT,
             ticker_or_company=self.ticker,
         )
@@ -283,7 +294,7 @@ class PerplexityResearchProvider:
         Returns:
             ResearchResult with valuation data, analyst ratings, and price targets
         """
-        prompt = format_prompt(
+        prompt = self.format_prompt(
             VALUATION_ANALYST_PROMPT,
             ticker_or_company=self.ticker,
         )
@@ -295,7 +306,7 @@ class PerplexityResearchProvider:
         Returns:
             ResearchResult with ownership data from 13F filings
         """
-        prompt = format_prompt(
+        prompt = self.format_prompt(
             INSTITUTIONAL_OWNERSHIP_PROMPT,
             ticker_or_company=self.ticker,
         )
@@ -307,7 +318,7 @@ class PerplexityResearchProvider:
         Returns:
             ResearchResult with short interest, options flow, and sentiment data
         """
-        prompt = format_prompt(
+        prompt = self.format_prompt(
             SHORT_INTEREST_SENTIMENT_PROMPT,
             ticker_or_company=self.ticker,
         )
@@ -319,7 +330,7 @@ class PerplexityResearchProvider:
         Returns:
             ResearchResult with ESG ratings, controversies, and sustainability data
         """
-        prompt = format_prompt(
+        prompt = self.format_prompt(
             ESG_SUSTAINABILITY_PROMPT,
             ticker_or_company=self.ticker,
         )
@@ -331,7 +342,7 @@ class PerplexityResearchProvider:
         Returns:
             ResearchResult with customer/supplier concentration and partnership data
         """
-        prompt = format_prompt(
+        prompt = self.format_prompt(
             SUPPLY_CHAIN_RELATIONSHIPS_PROMPT,
             ticker_or_company=self.ticker,
         )
@@ -343,7 +354,7 @@ class PerplexityResearchProvider:
         Returns:
             ResearchResult with economic sensitivity analysis
         """
-        prompt = format_prompt(
+        prompt = self.format_prompt(
             MACRO_SENSITIVITY_PROMPT,
             ticker_or_company=self.ticker,
         )
@@ -428,7 +439,7 @@ class PerplexityResearchProvider:
             raise KeyError("Unknown prompt: %s. Available: %s" % (prompt_name, available))
         
         prompt_info = PROMPT_REGISTRY[prompt_name]
-        prompt = format_prompt(
+        prompt = self.format_prompt(
             prompt_info["template"],
             ticker_or_company=self.ticker,
             **kwargs,
