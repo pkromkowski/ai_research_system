@@ -1,0 +1,46 @@
+[project]
+name = "ai-research-system"
+version = "0.1.0"
+description = "AI-powered thesis validation framework for equity research"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "Research Team"}
+]
+keywords = ["investment", "research", "thesis-validation", "AI"]
+
+dependencies = [
+    "anthropic>=0.76.0",
+    "ipykernel>=7.1.0",
+    "jupyterlab>=4.5.2",
+    "numpy>=2.4.1",
+    "pandas>=2.3.3",
+    "perplexityai>=0.24.0",
+    "pydantic>=2.12.5",
+    "scikit-learn>=1.8.0",
+    "statsmodels>=0.14.6",
+    "python-dotenv>=1.0.0",
+    "requests>=2.31.0",
+    "pyyaml>=6.0",
+    "streamlit>=1.53.1",
+    "plotly>=6.5.2",
+    "watchdog>=6.0.0",
+    "jupyter",
+    "yfinance>=1.1.0",
+    "flask>=3.1.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["agents", "api", "core", "data", "documents", "orchestration", "preprocessing"]
